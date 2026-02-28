@@ -254,6 +254,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_response_serde_roundtrip() {
+        let request = Request {
+            id: Uuid::new_v4(),
+            action: Action::Set {
+                writes: BTreeMap::from([
+                    ("hvac.power".to_string(), "true".to_string()),
+                    ("hvac.target_temp".to_string(), "21.5".to_string()),
+                ]),
+                instance: Some(0),
+            },
+        };
+        let encoded_request =
+            serde_json::to_string(&request).expect("request should serialize to json");
+        let decoded_request: Request =
+            serde_json::from_str(&encoded_request).expect("request should deserialize from json");
+        match decoded_request.action {
+            Action::Set { writes, instance } => {
+                assert_eq!(instance, Some(0));
+                assert_eq!(writes.len(), 2);
+            }
+            other => panic!("expected set action, got {other:?}"),
+        }
+
+        let response = Response::ok(
+            request.id,
+            ResponseData::SetResult {
+                instance: 0,
+                writes_applied: 2,
+            },
+        );
+        let encoded_response =
+            serde_json::to_string(&response).expect("response should serialize to json");
+        let decoded_response: Response =
+            serde_json::from_str(&encoded_response).expect("response should deserialize from json");
+        assert!(decoded_response.success);
+        assert!(decoded_response.error.is_none());
+    }
+
+    #[test]
     fn duration_parser_handles_units() {
         assert_eq!(parse_duration_us("1s").expect("1s should parse"), 1_000_000);
         assert_eq!(

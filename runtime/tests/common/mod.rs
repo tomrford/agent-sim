@@ -71,6 +71,28 @@ pub fn run_agent(args: &[&str]) -> String {
     String::from_utf8(output).expect("stdout should be valid utf8")
 }
 
+#[allow(dead_code)]
+pub fn run_agent_fail(args: &[&str]) -> String {
+    let exe = std::env::var("CARGO_BIN_EXE_agent-sim")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_agent_sim"))
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("debug")
+                .join("agent-sim")
+                .display()
+                .to_string()
+        });
+    let output = Command::new(exe)
+        .args(args)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    String::from_utf8(output).expect("stderr should be valid utf8")
+}
+
 fn run_shell(command: &str) {
     let status = std::process::Command::new("bash")
         .arg("-lc")
