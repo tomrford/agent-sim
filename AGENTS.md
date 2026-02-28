@@ -27,7 +27,11 @@ nix develop -c cargo build
 nix develop -c zig build
 ```
 
-The nix daemon must be running (`sudo /nix/var/nix/profiles/default/bin/nix-daemon &`) and PATH must include `/nix/var/nix/profiles/default/bin`.
+Nix is installed in single-user mode (`--no-daemon`). Source the profile before use:
+
+```sh
+. /home/ubuntu/.nix-profile/etc/profile.d/nix.sh
+```
 
 ### Build / test / lint
 
