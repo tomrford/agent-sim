@@ -72,3 +72,30 @@ fn glob_selector_reads_matching_signals() {
 
     let _ = run_agent(&["--session", &session, "close"]);
 }
+
+#[test]
+fn wildcard_and_id_selectors_work() {
+    ensure_fixtures_built();
+    let session = unique_session("signal-io-id");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let all = run_agent(&["--session", &session, "get", "*"]);
+    assert!(all.contains("demo.input"));
+    assert!(all.contains("demo.output"));
+
+    let by_id = run_agent(&["--session", &session, "get", "#1"]);
+    assert!(by_id.contains("demo.output"));
+
+    let missing = run_agent_fail(&["--session", &session, "get", "#999"]);
+    assert!(
+        missing.contains("signal not found: '#999'"),
+        "expected missing id error, got: {missing}"
+    );
+
+    let _ = run_agent(&["--session", &session, "close"]);
+}
