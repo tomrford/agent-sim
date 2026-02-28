@@ -24,9 +24,6 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = ["rust-src" "rustfmt" "clippy" "rust-analyzer"];
         };
-
-        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-
       in {
         devShells.default = pkgs.mkShell {
           packages = [
@@ -34,8 +31,6 @@
             pkgs.zigpkgs."0.15.2"
           ];
         };
-
-        formatter = pkgs.alejandra;
       }
     );
 }
