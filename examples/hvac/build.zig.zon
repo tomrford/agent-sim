@@ -1,0 +1,14 @@
+.{
+    .name = .sim_hvac_example,
+    .version = "0.1.0",
+    .fingerprint = 0x2700f6e6757c0b56,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "project.zig",
+        "src",
+        "include",
+    },
+}
