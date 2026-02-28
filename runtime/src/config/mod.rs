@@ -2,7 +2,7 @@ pub mod error;
 pub mod recipe;
 
 use crate::config::error::ConfigError;
-use crate::config::recipe::{parse_config, FileConfig, RecipeDef};
+use crate::config::recipe::{FileConfig, RecipeDef, parse_config};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

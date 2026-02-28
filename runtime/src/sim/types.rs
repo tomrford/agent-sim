@@ -182,6 +182,11 @@ impl SignalValue {
         }
     }
 
+    /// # Safety
+    ///
+    /// The caller must ensure `raw` originated from a valid `SimValue`
+    /// representation using the `sim_api.h` ABI contract. If `signal_type`
+    /// does not match the active union field, behavior is undefined.
     pub unsafe fn from_raw(raw: SimValueRaw) -> Option<Self> {
         match SimTypeRaw::try_from(raw.signal_type).ok()? {
             SimTypeRaw::Bool => Some(Self::Bool(unsafe { raw.data.b })),

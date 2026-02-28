@@ -1,8 +1,8 @@
 use crate::config::load_config;
-use crate::config::recipe::{toml_value_to_cli_string, ForSpec, PrintSpec, RecipeStep};
+use crate::config::recipe::{ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
 use crate::protocol::{
-    parse_duration_us, Action, InstanceData, Request, Response, ResponseData, SessionInfoData,
-    SignalData, SignalValueData, WatchSampleData,
+    Action, InstanceData, Request, Response, ResponseData, SessionInfoData, SignalData,
+    SignalValueData, WatchSampleData, parse_duration_us,
 };
 use crate::sim::error::{InstanceError, ProjectError, SimError};
 use crate::sim::instance_manager::InstanceManager;
@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 
 pub struct DaemonState {
     session: String,
@@ -156,7 +156,10 @@ pub async fn run_listener(session: String, socket_path: PathBuf) -> Result<(), s
     Ok(())
 }
 
-async fn handle_connection(mut stream: UnixStream, state: &mut DaemonState) -> Result<(), std::io::Error> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    state: &mut DaemonState,
+) -> Result<(), std::io::Error> {
     let mut line = String::new();
     let mut reader = BufReader::new(&mut stream);
     let read = reader.read_line(&mut line).await?;
@@ -174,9 +177,7 @@ async fn handle_connection(mut stream: UnixStream, state: &mut DaemonState) -> R
     };
     drop(reader);
     let mut payload = serde_json::to_string(&response).unwrap_or_else(|e| {
-        format!(
-            "{{\"success\":false,\"error\":\"response serialization failed: {e}\"}}"
-        )
+        format!("{{\"success\":false,\"error\":\"response serialization failed: {e}\"}}")
     });
     payload.push('\n');
     stream.write_all(payload.as_bytes()).await?;
@@ -336,7 +337,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 .project
                 .as_ref()
                 .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state.resolve_instance(instance).map_err(|e| e.to_string())?;
+            let target = state
+                .resolve_instance(instance)
+                .map_err(|e| e.to_string())?;
             let ids = DaemonState::select_signal_ids(project, &selectors)
                 .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
             let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
@@ -364,7 +367,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 .project
                 .as_ref()
                 .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state.resolve_instance(instance).map_err(|e| e.to_string())?;
+            let target = state
+                .resolve_instance(instance)
+                .map_err(|e| e.to_string())?;
             let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
@@ -401,9 +406,12 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
         }
         Action::TimePause => {
             state.time.pause().map_err(|e| e.to_string())?;
-            let status = state
-                .time
-                .status(state.project.as_ref().map(|project| project.tick_duration_us()));
+            let status = state.time.status(
+                state
+                    .project
+                    .as_ref()
+                    .map(|project| project.tick_duration_us()),
+            );
             Ok(ResponseData::TimeStatus {
                 state: status.state,
                 elapsed_ticks: status.elapsed_ticks,
@@ -429,16 +437,22 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
         }
         Action::TimeSpeed { multiplier } => {
             if let Some(multiplier) = multiplier {
-                state.time.set_speed(multiplier).map_err(|e| e.to_string())?;
+                state
+                    .time
+                    .set_speed(multiplier)
+                    .map_err(|e| e.to_string())?;
             }
             Ok(ResponseData::Speed {
                 speed: state.time.speed(),
             })
         }
         Action::TimeStatus => {
-            let status = state
-                .time
-                .status(state.project.as_ref().map(|project| project.tick_duration_us()));
+            let status = state.time.status(
+                state
+                    .project
+                    .as_ref()
+                    .map(|project| project.tick_duration_us()),
+            );
             Ok(ResponseData::TimeStatus {
                 state: status.state,
                 elapsed_ticks: status.elapsed_ticks,
@@ -456,7 +470,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 .project
                 .as_ref()
                 .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state.resolve_instance(instance).map_err(|e| e.to_string())?;
+            let target = state
+                .resolve_instance(instance)
+                .map_err(|e| e.to_string())?;
             let ids = DaemonState::select_signal_ids(project, std::slice::from_ref(&selector))
                 .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
             let id = *ids
@@ -470,9 +486,7 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             let mut out = Vec::new();
             for _ in 0..count {
                 let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
-                let value = project
-                    .read_ctx(ctx, &signal)
-                    .map_err(|e| e.to_string())?;
+                let value = project.read_ctx(ctx, &signal).map_err(|e| e.to_string())?;
                 let status = state.time.status(Some(project.tick_duration_us()));
                 out.push(WatchSampleData {
                     tick: status.elapsed_ticks,
@@ -491,7 +505,8 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             config,
         } => {
             let mut events = Vec::new();
-            let config = load_config(config.as_deref().map(Path::new)).map_err(|e| e.to_string())?;
+            let config =
+                load_config(config.as_deref().map(Path::new)).map_err(|e| e.to_string())?;
             let recipe_def = config.recipe(&recipe).map_err(|e| e.to_string())?;
             for step in &recipe_def.steps {
                 execute_recipe_step(step, dry_run, state, &mut events)

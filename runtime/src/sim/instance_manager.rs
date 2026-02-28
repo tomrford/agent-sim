@@ -49,7 +49,9 @@ impl InstanceManager {
     }
 
     pub fn resolve_target(&self, override_index: Option<u32>) -> Result<u32, InstanceError> {
-        let index = override_index.or(self.active_index).ok_or(InstanceError::NoActiveInstance)?;
+        let index = override_index
+            .or(self.active_index)
+            .ok_or(InstanceError::NoActiveInstance)?;
         if !self.instances.contains_key(&index) {
             return Err(InstanceError::IndexOutOfRange(index));
         }
@@ -84,6 +86,10 @@ impl InstanceManager {
 
     pub fn len(&self) -> usize {
         self.instances.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
     }
 
     pub fn iter_ctxs(&self) -> impl Iterator<Item = *mut SimCtx> + '_ {

@@ -1,7 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-sim", version, about = "Stateful firmware simulation runtime CLI")]
+#[command(
+    name = "agent-sim",
+    version,
+    about = "Stateful firmware simulation runtime CLI"
+)]
 pub struct CliArgs {
     /// Internal daemon mode
     #[arg(long, global = true, hide = true)]
@@ -12,7 +16,12 @@ pub struct CliArgs {
     pub json: bool,
 
     /// Named session
-    #[arg(long, global = true, env = "AGENT_SIM_SESSION", default_value = "default")]
+    #[arg(
+        long,
+        global = true,
+        env = "AGENT_SIM_SESSION",
+        default_value = "default"
+    )]
     pub session: String,
 
     /// Override active instance for this command
@@ -24,14 +33,12 @@ pub struct CliArgs {
     pub config: Option<String>,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Load {
-        libpath: String,
-    },
+    Load { libpath: String },
     Unload,
     Info,
     Signals,

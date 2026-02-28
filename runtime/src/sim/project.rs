@@ -1,5 +1,7 @@
 use crate::sim::error::{ProjectError, SimError};
-use crate::sim::types::{SignalMeta, SignalType, SignalValue, SimCtx, SimSignalDescRaw, SimValueRaw};
+use crate::sim::types::{
+    SignalMeta, SignalType, SignalValue, SimCtx, SimSignalDescRaw, SimValueRaw,
+};
 use libloading::Library;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -41,8 +43,8 @@ pub struct Project {
 impl Project {
     pub fn load(libpath: impl AsRef<Path>) -> Result<Self, ProjectError> {
         let path = libpath.as_ref().to_path_buf();
-        let library = unsafe { Library::new(&path) }
-            .map_err(|e| ProjectError::LibraryLoad(e.to_string()))?;
+        let library =
+            unsafe { Library::new(&path) }.map_err(|e| ProjectError::LibraryLoad(e.to_string()))?;
 
         let sim_new: SimNewFn = *unsafe { library.get::<SimNewFn>(b"sim_new\0") }
             .map_err(|_| ProjectError::MissingSymbol("sim_new"))?;
@@ -54,8 +56,9 @@ impl Project {
             .map_err(|_| ProjectError::MissingSymbol("sim_tick"))?;
         let sim_read_val: SimReadValFn = *unsafe { library.get::<SimReadValFn>(b"sim_read_val\0") }
             .map_err(|_| ProjectError::MissingSymbol("sim_read_val"))?;
-        let sim_write_val: SimWriteValFn = *unsafe { library.get::<SimWriteValFn>(b"sim_write_val\0") }
-            .map_err(|_| ProjectError::MissingSymbol("sim_write_val"))?;
+        let sim_write_val: SimWriteValFn =
+            *unsafe { library.get::<SimWriteValFn>(b"sim_write_val\0") }
+                .map_err(|_| ProjectError::MissingSymbol("sim_write_val"))?;
         let sim_get_signal_count: SimGetSignalCountFn =
             *unsafe { library.get::<SimGetSignalCountFn>(b"sim_get_signal_count\0") }
                 .map_err(|_| ProjectError::MissingSymbol("sim_get_signal_count"))?;
@@ -190,7 +193,7 @@ impl Project {
         self.signal_name_to_id.get(name).copied()
     }
 
-    pub fn new_ctx(&self) -> Result<*mut SimCtx, SimError> {
+    pub(crate) fn new_ctx(&self) -> Result<*mut SimCtx, SimError> {
         let ptr = unsafe { (self.sim_new)() };
         if ptr.is_null() {
             Err(SimError::Internal)
@@ -199,31 +202,35 @@ impl Project {
         }
     }
 
-    pub fn free_ctx(&self, ctx: *mut SimCtx) {
+    pub(crate) fn free_ctx(&self, ctx: *mut SimCtx) {
         unsafe { (self.sim_free)(ctx) };
     }
 
-    pub fn reset_ctx(&self, ctx: *mut SimCtx) -> Result<(), SimError> {
+    pub(crate) fn reset_ctx(&self, ctx: *mut SimCtx) -> Result<(), SimError> {
         self.map_status(unsafe { (self.sim_reset)(ctx) }, None, None)
     }
 
-    pub fn tick_ctx(&self, ctx: *mut SimCtx) -> Result<(), SimError> {
+    pub(crate) fn tick_ctx(&self, ctx: *mut SimCtx) -> Result<(), SimError> {
         self.map_status(unsafe { (self.sim_tick)(ctx) }, None, None)
     }
 
-    pub fn read_ctx(&self, ctx: *mut SimCtx, signal: &SignalMeta) -> Result<SignalValue, SimError> {
+    pub(crate) fn read_ctx(
+        &self,
+        ctx: *mut SimCtx,
+        signal: &SignalMeta,
+    ) -> Result<SignalValue, SimError> {
         let mut raw = SimValueRaw {
             signal_type: 0,
             data: crate::sim::types::SimValueDataRaw { u32: 0 },
         };
         let status = unsafe { (self.sim_read_val)(ctx, signal.id, &mut raw as *mut SimValueRaw) };
         self.map_status(status, Some(signal), None)?;
-        let value =
-            unsafe { SignalValue::from_raw(raw) }.ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))?;
+        let value = unsafe { SignalValue::from_raw(raw) }
+            .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))?;
         Ok(value)
     }
 
-    pub fn write_ctx(
+    pub(crate) fn write_ctx(
         &self,
         ctx: *mut SimCtx,
         signal: &SignalMeta,

@@ -1,5 +1,5 @@
 use crate::protocol::{Response, ResponseData};
-use comfy_table::{presets::UTF8_HORIZONTAL_ONLY, ContentArrangement, Table};
+use comfy_table::{ContentArrangement, Table, presets::UTF8_HORIZONTAL_ONLY};
 use serde_json::json;
 
 pub fn print_response(response: &Response, json_mode: bool) {
@@ -13,7 +13,10 @@ pub fn print_response(response: &Response, json_mode: bool) {
                     "name": sample.signal,
                     "value": sample.value
                 });
-                println!("{}", serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string()));
+                println!(
+                    "{}",
+                    serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string())
+                );
             }
             return;
         }

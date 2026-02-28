@@ -1,13 +1,12 @@
-use crate::cli::args::{
-    CliArgs, Command, InstanceCommand, SessionCommand, SetArgs, TimeCommand,
-};
+use crate::cli::args::{CliArgs, Command, InstanceCommand, SessionCommand, SetArgs, TimeCommand};
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
-    let action = match &args.command {
+    let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
+    let action = match command {
         Command::Load { libpath } => Action::Load {
             libpath: libpath.clone(),
         },
@@ -64,10 +63,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
 }
 
 fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliError> {
-    if args.entries.len() == 2
-        && !args.entries[0].contains('=')
-        && !args.entries[1].contains('=')
-    {
+    if args.entries.len() == 2 && !args.entries[0].contains('=') && !args.entries[1].contains('=') {
         let mut map = BTreeMap::new();
         map.insert(args.entries[0].clone(), args.entries[1].clone());
         return Ok(map);

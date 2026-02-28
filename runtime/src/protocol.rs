@@ -260,10 +260,7 @@ mod tests {
             parse_duration_us("250ms").expect("250ms should parse"),
             250_000
         );
-        assert_eq!(
-            parse_duration_us("500us").expect("500us should parse"),
-            500
-        );
+        assert_eq!(parse_duration_us("500us").expect("500us should parse"), 500);
         assert_eq!(
             parse_duration_us("0.5s").expect("0.5s should parse"),
             500_000

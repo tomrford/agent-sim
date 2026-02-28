@@ -46,33 +46,15 @@ pub struct ForSpec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum RecipeStep {
-    Set {
-        set: BTreeMap<String, toml::Value>,
-    },
-    Step {
-        step: String,
-    },
-    Print {
-        print: PrintSpec,
-    },
-    Speed {
-        speed: f64,
-    },
-    Reset {
-        reset: Option<bool>,
-    },
-    InstanceNew {
-        instance_new: Option<bool>,
-    },
-    InstanceSelect {
-        instance_select: u32,
-    },
-    Sleep {
-        sleep: u64,
-    },
-    For {
-        r#for: ForSpec,
-    },
+    Set { set: BTreeMap<String, toml::Value> },
+    Step { step: String },
+    Print { print: PrintSpec },
+    Speed { speed: f64 },
+    Reset { reset: Option<bool> },
+    InstanceNew { instance_new: Option<bool> },
+    InstanceSelect { instance_select: u32 },
+    Sleep { sleep: u64 },
+    For { r#for: ForSpec },
 }
 
 pub fn parse_config(content: &str) -> Result<FileConfig, ConfigError> {

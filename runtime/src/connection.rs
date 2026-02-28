@@ -4,7 +4,7 @@ use crate::protocol::{Request, Response};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {

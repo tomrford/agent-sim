@@ -96,7 +96,11 @@ impl TimeEngine {
             return Err(TimeError::StepWhileRunning);
         }
         let tick_us = project.tick_duration_us() as u64;
-        let ticks = if tick_us == 0 { 0 } else { duration_us / tick_us };
+        let ticks = if tick_us == 0 {
+            0
+        } else {
+            duration_us / tick_us
+        };
         self.tick_all(project, instances, ticks)
             .map_err(|_| TimeError::ProjectNotLoaded)?;
         let advanced_us = ticks.saturating_mul(tick_us);
