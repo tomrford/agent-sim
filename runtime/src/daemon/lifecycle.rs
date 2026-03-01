@@ -8,6 +8,10 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 pub fn session_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("AGENT_SIM_HOME") {
+        return PathBuf::from(path);
+    }
+
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".agent-sim")

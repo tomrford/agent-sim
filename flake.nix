@@ -24,7 +24,25 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = ["rust-src" "rustfmt" "clippy" "rust-analyzer"];
         };
+
+        cargoToml = builtins.fromTOML (builtins.readFile ./runtime/Cargo.toml);
+
+        agent-sim = pkgs.rustPlatform.buildRustPackage {
+          pname = cargoToml.package.name;
+          version = cargoToml.package.version;
+          src = ./.;
+          cargoRoot = "runtime";
+          buildAndTestSubdir = "runtime";
+          cargoLock.lockFile = ./runtime/Cargo.lock;
+          buildType = "release";
+          doCheck = false;
+        };
       in {
+        packages = {
+          default = agent-sim;
+          agent-sim = agent-sim;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [
             rustToolchain

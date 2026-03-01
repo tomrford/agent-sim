@@ -51,17 +51,9 @@ pub fn ensure_fixtures_built() {
 }
 
 pub fn run_agent(args: &[&str]) -> String {
-    let exe = std::env::var("CARGO_BIN_EXE_agent-sim")
-        .or_else(|_| std::env::var("CARGO_BIN_EXE_agent_sim"))
-        .unwrap_or_else(|_| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("debug")
-                .join("agent-sim")
-                .display()
-                .to_string()
-        });
+    let exe = resolve_agent_exe();
     let output = Command::new(exe)
+        .env("AGENT_SIM_HOME", test_agent_sim_home())
         .args(args)
         .assert()
         .success()
@@ -73,17 +65,9 @@ pub fn run_agent(args: &[&str]) -> String {
 
 #[allow(dead_code)]
 pub fn run_agent_fail(args: &[&str]) -> String {
-    let exe = std::env::var("CARGO_BIN_EXE_agent-sim")
-        .or_else(|_| std::env::var("CARGO_BIN_EXE_agent_sim"))
-        .unwrap_or_else(|_| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("debug")
-                .join("agent-sim")
-                .display()
-                .to_string()
-        });
+    let exe = resolve_agent_exe();
     let output = Command::new(exe)
+        .env("AGENT_SIM_HOME", test_agent_sim_home())
         .args(args)
         .assert()
         .failure()
@@ -94,13 +78,73 @@ pub fn run_agent_fail(args: &[&str]) -> String {
 }
 
 fn run_shell(command: &str) {
-    let status = std::process::Command::new("bash")
-        .arg("-lc")
+    let output = std::process::Command::new("bash")
+        .arg("-c")
         .arg(command)
         .current_dir(repo_root())
-        .status()
+        .output()
         .expect("fixture build command should run");
-    assert!(status.success(), "fixture build command failed: {command}");
+    assert!(
+        output.status.success(),
+        "fixture build command failed: {command}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn test_agent_sim_home() -> PathBuf {
+    let path = PathBuf::from("/tmp/agent-sim-tests");
+    let _ = std::fs::create_dir_all(&path);
+    path
+}
+
+fn resolve_agent_exe() -> String {
+    if let Ok(exe) = std::env::var("CARGO_BIN_EXE_agent-sim") {
+        return exe;
+    }
+    if let Ok(exe) = std::env::var("CARGO_BIN_EXE_agent_sim") {
+        return exe;
+    }
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(profile_dir) = current_exe.parent().and_then(|p| p.parent())
+    {
+        let direct = profile_dir.join(bin_name());
+        if direct.exists() {
+            return direct.display().to_string();
+        }
+    }
+
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+
+    let mut candidates = Vec::new();
+    if let Ok(target) = std::env::var("TARGET") {
+        candidates.push(target_dir.join(&target).join(&profile).join(bin_name()));
+        candidates.push(target_dir.join(target).join("debug").join(bin_name()));
+    }
+    candidates.push(target_dir.join(&profile).join(bin_name()));
+    candidates.push(target_dir.join("debug").join(bin_name()));
+
+    candidates
+        .iter()
+        .find(|path| path.exists())
+        .unwrap_or(&candidates[0])
+        .display()
+        .to_string()
+}
+
+fn bin_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "agent-sim.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "agent-sim"
+    }
 }
 
 fn lib_extension() -> &'static str {
