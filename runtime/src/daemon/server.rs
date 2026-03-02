@@ -1,11 +1,10 @@
 use crate::config::load_config;
 use crate::config::recipe::{ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
 use crate::protocol::{
-    Action, InstanceData, Request, Response, ResponseData, SessionInfoData, SignalData,
-    SignalValueData, WatchSampleData, parse_duration_us,
+    Action, Request, Response, ResponseData, SessionInfoData, SignalData, SignalValueData,
+    WatchSampleData, parse_duration_us,
 };
-use crate::sim::error::{InstanceError, ProjectError, SimError};
-use crate::sim::instance_manager::InstanceManager;
+use crate::sim::error::SimError;
 use crate::sim::project::Project;
 use crate::sim::time::TimeEngine;
 use crate::sim::types::{SignalType, SignalValue};
@@ -19,26 +18,20 @@ use tokio::time::{Duration, sleep, timeout};
 pub struct DaemonState {
     session: String,
     socket_path: PathBuf,
-    project: Option<Project>,
-    instances: InstanceManager,
+    project: Project,
     time: TimeEngine,
     shutdown: bool,
 }
 
 impl DaemonState {
-    pub fn new(session: String, socket_path: PathBuf) -> Self {
+    pub fn new(session: String, socket_path: PathBuf, project: Project) -> Self {
         Self {
             session,
             socket_path,
-            project: None,
-            instances: InstanceManager::default(),
+            project,
             time: TimeEngine::default(),
             shutdown: false,
         }
-    }
-
-    fn resolve_instance(&self, override_index: Option<u32>) -> Result<u32, InstanceError> {
-        self.instances.resolve_target(override_index)
     }
 
     fn parse_value(signal_type: SignalType, raw: &str) -> Result<SignalValue, SimError> {
@@ -117,7 +110,11 @@ fn compile_glob(pattern: &str) -> Result<GlobMatcher, Box<dyn std::error::Error 
     Ok(Glob::new(pattern)?.compile_matcher())
 }
 
-pub async fn run_listener(session: String, socket_path: PathBuf) -> Result<(), std::io::Error> {
+pub async fn run_listener(
+    session: String,
+    socket_path: PathBuf,
+    project: Project,
+) -> Result<(), std::io::Error> {
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
     }
@@ -128,11 +125,9 @@ pub async fn run_listener(session: String, socket_path: PathBuf) -> Result<(), s
     let pid_path = crate::daemon::lifecycle::pid_path(&session);
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
-    let mut state = DaemonState::new(session, socket_path.clone());
+    let mut state = DaemonState::new(session, socket_path.clone(), project);
     loop {
-        if let Some(project) = state.project.as_ref() {
-            let _ = state.time.tick_realtime(project, &state.instances);
-        }
+        let _ = state.time.tick_realtime(&state.project);
 
         let accepted = timeout(Duration::from_millis(20), listener.accept()).await;
         match accepted {
@@ -199,64 +194,25 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
     match action {
         Action::Ping => Ok(ResponseData::Ack),
         Action::Load { libpath } => {
-            if let Some(project) = state.project.take() {
-                state.instances.clear(&project);
+            let bound = state.project.libpath.display().to_string();
+            if libpath != bound {
+                return Err(format!(
+                    "daemon already bound to '{bound}'; start a new session for a different DLL"
+                ));
             }
-            state.time.reset();
-            let project = Project::load(&libpath).map_err(|e| e.to_string())?;
-            state.project = Some(project);
-            let (signal_count, instance_count) = {
-                let project_ref = state
-                    .project
-                    .as_ref()
-                    .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-                state
-                    .instances
-                    .create(project_ref)
-                    .map_err(|e| e.to_string())?;
-                (project_ref.signals().len(), state.instances.len())
-            };
             Ok(ResponseData::Loaded {
-                libpath,
-                signal_count,
-                instance_count,
+                libpath: bound,
+                signal_count: state.project.signals().len(),
             })
         }
-        Action::Unload => {
-            if let Some(project) = state.project.take() {
-                state.instances.clear(&project);
-            }
-            state.time.reset();
-            Ok(ResponseData::Ack)
-        }
-        Action::Info => {
-            let data = if let Some(project) = state.project.as_ref() {
-                ResponseData::ProjectInfo {
-                    loaded: true,
-                    libpath: Some(project.libpath.display().to_string()),
-                    tick_duration_us: Some(project.tick_duration_us()),
-                    signal_count: project.signals().len(),
-                    instance_count: state.instances.len(),
-                    active_instance: state.instances.active_index(),
-                }
-            } else {
-                ResponseData::ProjectInfo {
-                    loaded: false,
-                    libpath: None,
-                    tick_duration_us: None,
-                    signal_count: 0,
-                    instance_count: 0,
-                    active_instance: None,
-                }
-            };
-            Ok(data)
-        }
+        Action::Info => Ok(ResponseData::ProjectInfo {
+            libpath: state.project.libpath.display().to_string(),
+            tick_duration_us: state.project.tick_duration_us(),
+            signal_count: state.project.signals().len(),
+        }),
         Action::Signals => {
-            let project = state
+            let signals = state
                 .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let signals = project
                 .signals()
                 .iter()
                 .map(|s| SignalData {
@@ -268,87 +224,20 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 .collect::<Vec<_>>();
             Ok(ResponseData::Signals { signals })
         }
-        Action::InstanceNew => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let new_index = state.instances.create(project).map_err(|e| e.to_string())?;
-            Ok(ResponseData::SelectedInstance {
-                active_instance: new_index,
-            })
+        Action::Reset => {
+            state.project.reset().map_err(|e| e.to_string())?;
+            Ok(ResponseData::Ack)
         }
-        Action::InstanceList => Ok(ResponseData::Instances {
-            instances: state
-                .instances
-                .list()
-                .into_iter()
-                .map(|index| InstanceData { index })
-                .collect(),
-            active_instance: state.instances.active_index(),
-        }),
-        Action::InstanceSelect { index } => {
-            state.instances.select(index).map_err(|e| e.to_string())?;
-            Ok(ResponseData::SelectedInstance {
-                active_instance: index,
-            })
-        }
-        Action::InstanceReset { index } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state
-                .instances
-                .resolve_target(index)
-                .map_err(|e| e.to_string())?;
-            state
-                .instances
-                .reset(project, target)
-                .map_err(|e| e.to_string())?;
-            Ok(ResponseData::SelectedInstance {
-                active_instance: state.instances.active_index().unwrap_or(target),
-            })
-        }
-        Action::InstanceFree { index } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            state
-                .instances
-                .free(project, index)
-                .map_err(|e| e.to_string())?;
-            Ok(ResponseData::Instances {
-                instances: state
-                    .instances
-                    .list()
-                    .into_iter()
-                    .map(|index| InstanceData { index })
-                    .collect(),
-                active_instance: state.instances.active_index(),
-            })
-        }
-        Action::Get {
-            selectors,
-            instance,
-        } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state
-                .resolve_instance(instance)
-                .map_err(|e| e.to_string())?;
-            let ids = DaemonState::select_signal_ids(project, &selectors)
+        Action::Get { selectors } => {
+            let ids = DaemonState::select_signal_ids(&state.project, &selectors)
                 .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
-            let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
             let mut values = Vec::new();
             for id in ids {
-                let signal = project
+                let signal = state
+                    .project
                     .signal_by_id(id)
                     .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
-                let value = project.read_ctx(ctx, signal).map_err(|e| e.to_string())?;
+                let value = state.project.read(signal).map_err(|e| e.to_string())?;
                 values.push(SignalValueData {
                     id: signal.id,
                     name: signal.name.clone(),
@@ -357,46 +246,35 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                     units: signal.units.clone(),
                 });
             }
-            Ok(ResponseData::SignalValues {
-                instance: target,
-                values,
-            })
+            Ok(ResponseData::SignalValues { values })
         }
-        Action::Set { writes, instance } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state
-                .resolve_instance(instance)
-                .map_err(|e| e.to_string())?;
-            let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
+        Action::Set { writes } => {
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
-                let ids = DaemonState::select_signal_ids(project, std::slice::from_ref(&selector))
-                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                let ids =
+                    DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
+                        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
                 for id in ids {
-                    let signal = project
+                    let signal = state
+                        .project
                         .signal_by_id(id)
                         .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
                     let value = DaemonState::parse_value(signal.signal_type, &raw_value)
                         .map_err(|e| e.to_string())?;
-                    project
-                        .write_ctx(ctx, signal, &value)
+                    state
+                        .project
+                        .write(signal, &value)
                         .map_err(|e| e.to_string())?;
                     applied += 1;
                 }
             }
             Ok(ResponseData::SetResult {
-                instance: target,
                 writes_applied: applied,
             })
         }
         Action::TimeStart => {
             state.time.start().map_err(|e| e.to_string())?;
-            let status = state
-                .time
-                .status(state.project.as_ref().map(|p| p.tick_duration_us()));
+            let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
                 elapsed_ticks: status.elapsed_ticks,
@@ -406,12 +284,7 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
         }
         Action::TimePause => {
             state.time.pause().map_err(|e| e.to_string())?;
-            let status = state.time.status(
-                state
-                    .project
-                    .as_ref()
-                    .map(|project| project.tick_duration_us()),
-            );
+            let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
                 elapsed_ticks: status.elapsed_ticks,
@@ -420,14 +293,10 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             })
         }
         Action::TimeStep { duration } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
             let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
             let step = state
                 .time
-                .step(project, &state.instances, duration_us)
+                .step(&state.project, duration_us)
                 .map_err(|e| e.to_string())?;
             Ok(ResponseData::TimeAdvanced {
                 requested_us: step.requested_us,
@@ -447,12 +316,7 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             })
         }
         Action::TimeStatus => {
-            let status = state.time.status(
-                state
-                    .project
-                    .as_ref()
-                    .map(|project| project.tick_duration_us()),
-            );
+            let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
                 elapsed_ticks: status.elapsed_ticks,
@@ -464,34 +328,26 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             selector,
             interval_ms,
             samples,
-            instance,
         } => {
-            let project = state
-                .project
-                .as_ref()
-                .ok_or_else(|| ProjectError::NotLoaded.to_string())?;
-            let target = state
-                .resolve_instance(instance)
-                .map_err(|e| e.to_string())?;
-            let ids = DaemonState::select_signal_ids(project, std::slice::from_ref(&selector))
-                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+            let ids =
+                DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
+                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
             let id = *ids
                 .first()
                 .ok_or_else(|| SimError::InvalidSignal(selector.clone()).to_string())?;
-            let signal = project
+            let signal = state
+                .project
                 .signal_by_id(id)
                 .ok_or_else(|| SimError::InvalidSignal(selector.clone()).to_string())?
                 .clone();
             let count = samples.unwrap_or(10).max(1);
             let mut out = Vec::new();
             for _ in 0..count {
-                let ctx = state.instances.get_ctx(target).map_err(|e| e.to_string())?;
-                let value = project.read_ctx(ctx, &signal).map_err(|e| e.to_string())?;
-                let status = state.time.status(Some(project.tick_duration_us()));
+                let value = state.project.read(&signal).map_err(|e| e.to_string())?;
+                let status = state.time.status(state.project.tick_duration_us());
                 out.push(WatchSampleData {
                     tick: status.elapsed_ticks,
                     time_us: status.elapsed_time_us,
-                    instance: target,
                     signal: signal.name.clone(),
                     value,
                 });
@@ -565,10 +421,7 @@ async fn execute_recipe_step(
             if !dry_run {
                 let req = Request {
                     id: uuid::Uuid::new_v4(),
-                    action: Action::Set {
-                        writes,
-                        instance: None,
-                    },
+                    action: Action::Set { writes },
                 };
                 dispatch_action(req.action, state).await?;
             }
@@ -595,10 +448,7 @@ async fn execute_recipe_step(
             if !dry_run {
                 let req = Request {
                     id: uuid::Uuid::new_v4(),
-                    action: Action::Get {
-                        selectors,
-                        instance: None,
-                    },
+                    action: Action::Get { selectors },
                 };
                 dispatch_action(req.action, state).await?;
             }
@@ -620,29 +470,7 @@ async fn execute_recipe_step(
             if !dry_run {
                 let req = Request {
                     id: uuid::Uuid::new_v4(),
-                    action: Action::InstanceReset { index: None },
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::InstanceNew { .. } => {
-            events.push("instance_new".to_string());
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::InstanceNew,
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::InstanceSelect { instance_select } => {
-            events.push(format!("instance_select {instance_select}"));
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::InstanceSelect {
-                        index: *instance_select,
-                    },
+                    action: Action::Reset,
                 };
                 dispatch_action(req.action, state).await?;
             }
@@ -683,10 +511,7 @@ async fn execute_for_step(
             writes.insert(spec.signal.clone(), current.to_string());
             let req = Request {
                 id: uuid::Uuid::new_v4(),
-                action: Action::Set {
-                    writes,
-                    instance: None,
-                },
+                action: Action::Set { writes },
             };
             dispatch_action(req.action, state).await?;
         }

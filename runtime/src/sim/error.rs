@@ -3,10 +3,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
-    #[error("project already loaded")]
-    AlreadyLoaded,
-    #[error("project not loaded")]
-    NotLoaded,
     #[error("library load failed: {0}")]
     LibraryLoad(String),
     #[error("missing symbol: {0}")]
@@ -17,8 +13,8 @@ pub enum ProjectError {
 
 #[derive(Debug, Error)]
 pub enum SimError {
-    #[error("invalid instance context (freed or corrupted)")]
-    InvalidCtx,
+    #[error("simulation state not initialized")]
+    NotInitialized,
     #[error("invalid argument: {0}")]
     InvalidArg(String),
     #[error("signal not found: '{0}'")]
@@ -38,17 +34,9 @@ pub enum SimError {
 }
 
 #[derive(Debug, Error)]
-pub enum InstanceError {
-    #[error("no active instance")]
-    NoActiveInstance,
-    #[error("instance index out of range: {0}")]
-    IndexOutOfRange(u32),
-}
-
-#[derive(Debug, Error)]
 pub enum TimeError {
-    #[error("time engine requires loaded project")]
-    ProjectNotLoaded,
+    #[error(transparent)]
+    Sim(#[from] SimError),
     #[error("step while running is not allowed; pause first")]
     StepWhileRunning,
     #[error("time engine is already running")]
@@ -66,7 +54,7 @@ impl TryFrom<u32> for SimError {
         let status = SimStatusRaw::try_from(value).map_err(|_| SimError::UnknownStatus(value))?;
         Ok(match status {
             SimStatusRaw::Ok => return Err(SimError::UnknownStatus(0)),
-            SimStatusRaw::InvalidCtx => SimError::InvalidCtx,
+            SimStatusRaw::NotInitialized => SimError::NotInitialized,
             SimStatusRaw::InvalidArg => SimError::InvalidArg("invalid ffi argument".to_string()),
             SimStatusRaw::InvalidSignal => SimError::InvalidSignal("<unknown>".to_string()),
             SimStatusRaw::TypeMismatch => SimError::Internal,

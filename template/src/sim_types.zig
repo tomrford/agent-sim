@@ -2,7 +2,7 @@ pub const SignalId = u32;
 
 pub const SimStatus = enum(u32) {
     OK = 0,
-    INVALID_CTX = 1,
+    NOT_INITIALIZED = 1,
     INVALID_ARG = 2,
     INVALID_SIGNAL = 3,
     TYPE_MISMATCH = 4,

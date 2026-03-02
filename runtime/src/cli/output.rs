@@ -9,7 +9,6 @@ pub fn print_response(response: &Response, json_mode: bool) {
                 let line = json!({
                     "tick": sample.tick,
                     "time_us": sample.time_us,
-                    "instance": sample.instance,
                     "name": sample.signal,
                     "value": sample.value
                 });
@@ -38,35 +37,19 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Some(ResponseData::Loaded {
             libpath,
             signal_count,
-            instance_count,
         }) => {
             println!("Loaded: {libpath}");
             println!("Signals: {signal_count}");
-            println!("Instances: {instance_count}");
         }
         Some(ResponseData::ProjectInfo {
-            loaded,
             libpath,
             tick_duration_us,
             signal_count,
-            instance_count,
-            active_instance,
         }) => {
-            println!("Loaded: {loaded}");
-            if let Some(path) = libpath {
-                println!("Project: {path}");
-            }
-            if let Some(tick) = tick_duration_us {
-                println!("Tick(us): {tick}");
-            }
+            println!("Loaded: true");
+            println!("Project: {libpath}");
+            println!("Tick(us): {tick_duration_us}");
             println!("Signals: {signal_count}");
-            println!("Instances: {instance_count}");
-            println!(
-                "Active instance: {}",
-                active_instance
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            );
         }
         Some(ResponseData::Signals { signals }) => {
             let mut table = Table::new();
@@ -84,30 +67,7 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
-        Some(ResponseData::Instances {
-            instances,
-            active_instance,
-        }) => {
-            let mut table = Table::new();
-            table
-                .load_preset(UTF8_HORIZONTAL_ONLY)
-                .set_header(vec!["Index", "Active"]);
-            for instance in instances {
-                table.add_row(vec![
-                    instance.index.to_string(),
-                    if Some(instance.index) == *active_instance {
-                        "yes".to_string()
-                    } else {
-                        String::new()
-                    },
-                ]);
-            }
-            println!("{table}");
-        }
-        Some(ResponseData::SelectedInstance { active_instance }) => {
-            println!("Active instance: {active_instance}");
-        }
-        Some(ResponseData::SignalValues { values, .. }) => {
+        Some(ResponseData::SignalValues { values }) => {
             let mut table = Table::new();
             table
                 .load_preset(UTF8_HORIZONTAL_ONLY)
@@ -123,11 +83,7 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
-        Some(ResponseData::SetResult {
-            instance,
-            writes_applied,
-        }) => {
-            println!("Instance: {instance}");
+        Some(ResponseData::SetResult { writes_applied }) => {
             println!("Writes applied: {writes_applied}");
         }
         Some(ResponseData::TimeStatus {

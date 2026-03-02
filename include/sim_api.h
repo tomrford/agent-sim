@@ -13,7 +13,7 @@ extern "C" {
  * @brief Stable C ABI for firmware simulation DLLs.
  *
  * Design intent:
- * - One opaque context per simulated device instance.
+ * - One DLL process hosts one simulation device state.
  * - Host drives simulation explicitly in fixed quanta via sim_tick().
  * - Host discovers signal surface at runtime via metadata APIs.
  * - All read/write operations are runtime type-checked.
@@ -21,23 +21,19 @@ extern "C" {
  * Typical host flow:
  * 1. sim_get_tick_duration_us()
  * 2. sim_get_signal_count() + sim_get_signals()
- * 3. sim_new()
+ * 3. sim_init()
  * 4. loop: sim_write_val() -> sim_tick() -> sim_read_val()
- * 5. sim_free()
+ * 5. sim_reset() as needed
  *
  * Threading contract:
- * - A single SimCtx must not be used concurrently from multiple threads.
- * - Different SimCtx objects may be used on different threads.
- * - Host should serialize operations per SimCtx.
+ * - Calls must be serialized per loaded DLL.
+ * - Concurrent calls into a single loaded DLL are not supported.
  */
 
 /** Major ABI version for this header contract. */
 #define SIM_API_VERSION_MAJOR 1U
 /** Minor ABI version for additive non-breaking changes. */
 #define SIM_API_VERSION_MINOR 0U
-
-/** Opaque simulation context (owned by DLL). */
-typedef struct SimCtx SimCtx;
 
 /** Runtime signal identifier (discovered via metadata APIs). */
 typedef uint32_t SignalId;
@@ -49,8 +45,8 @@ typedef enum {
   /** Call succeeded. */
   SIM_OK = 0,
 
-  /** SimCtx pointer was null, freed, or not recognized by this DLL instance. */
-  SIM_ERR_INVALID_CTX = 1,
+  /** Simulation state has not been initialized via sim_init(). */
+  SIM_ERR_NOT_INITIALIZED = 1,
 
   /** One or more input pointers/arguments are invalid. */
   SIM_ERR_INVALID_ARG = 2,
@@ -120,48 +116,40 @@ typedef struct {
 } SimSignalDesc;
 
 /**
- * @brief Allocate a new simulation context.
+ * @brief Initialize simulation state.
  *
- * Context is returned already reset to deterministic post-startup state.
- *
- * @return non-null on success, NULL on allocation/initialization failure.
+ * Implementations must set deterministic startup state.
+ * Safe to call multiple times; each call should restore deterministic startup
+ * state.
  */
-SimCtx *sim_new(void);
+SimStatus sim_init(void);
 
 /**
- * @brief Free a simulation context.
- *
- * Safe with NULL (no-op).
+ * @brief Reset simulation state to deterministic startup state.
  */
-void sim_free(SimCtx *ctx);
-
-/**
- * @brief Reset context to deterministic startup state.
- */
-SimStatus sim_reset(SimCtx *ctx);
+SimStatus sim_reset(void);
 
 /**
  * @brief Advance simulation by exactly one tick quantum.
  *
  * Tick duration is reported by sim_get_tick_duration_us().
  */
-SimStatus sim_tick(SimCtx *ctx);
+SimStatus sim_tick(void);
 
 /**
  * @brief Read current signal value.
  *
- * @param ctx simulation context
  * @param id signal identifier from catalog
  * @param out output SimValue (must be non-null)
  */
-SimStatus sim_read_val(SimCtx *ctx, SignalId id, SimValue *out);
+SimStatus sim_read_val(SignalId id, SimValue *out);
 
 /**
- * @brief Write signal value (applied to context state).
+ * @brief Write signal value (applied to simulation state).
  *
  * Type must match catalog metadata exactly.
  */
-SimStatus sim_write_val(SimCtx *ctx, SignalId id, const SimValue *in);
+SimStatus sim_write_val(SignalId id, const SimValue *in);
 
 /**
  * @brief Get number of signals in current catalog.

@@ -15,7 +15,11 @@ async fn main() -> std::process::ExitCode {
 
     let args = CliArgs::parse();
     if args.daemon {
-        if let Err(err) = daemon::run(&args.session).await {
+        let Some(libpath) = args.libpath.as_deref() else {
+            eprintln!("daemon mode requires --libpath");
+            return std::process::ExitCode::from(1);
+        };
+        if let Err(err) = daemon::run(&args.session, libpath).await {
             eprintln!("{err}");
             return std::process::ExitCode::from(1);
         }

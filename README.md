@@ -31,7 +31,7 @@ agent-sim close
 ```
 CLI client  ◄── JSON lines over Unix socket ──►  Daemon (same binary, --daemon)
                                                    ├─ Project (dlopen DLL, sim_api.h ABI)
-                                                   │  └─ Instance 0..N (SimCtx*)
+                                                   │  └─ Device state (singleton, in-process)
                                                    └─ Time Engine (tick loop)
 ```
 
@@ -42,25 +42,23 @@ Single binary. No external runtime dependencies. Cross-platform (Linux, macOS, W
 | Term         | Meaning                                                                      |
 | ------------ | ---------------------------------------------------------------------------- |
 | **Project**  | Loaded shared library (`.so`/`.dylib`/`.dll`) implementing `sim_api.h`       |
-| **Instance** | One `SimCtx*` handle — a simulated device                                    |
 | **Signal**   | Named, typed value exposed by the project. Address by name, `#id`, or glob   |
 | **Tick**     | One simulation quantum. Duration from `sim_get_tick_duration_us()`           |
-| **Session**  | Isolated daemon process with its own socket, project, instances, time engine |
+| **Session**  | Isolated daemon process with its own socket, one bound project, time engine  |
 | **Recipe**   | Named command sequence in `agent-sim.toml`                                   |
 
 ## Commands
 
 ```
-agent-sim load <libpath>              # Load project
-agent-sim unload                      # Unload project
+agent-sim load <libpath>              # Start session daemon bound to DLL
 agent-sim info                        # Project metadata
 agent-sim signals                     # List all signals
+agent-sim reset                       # Reset device state to deterministic startup
 
 agent-sim get <signal> [<signal>...]  # Read signals (name, #id, or glob)
 agent-sim set <sig>=<val> [...]       # Write signals (batch supported)
 agent-sim watch <signal> [ms]         # Stream signal values
 
-agent-sim instance new|list|select|reset|free
 agent-sim time start|pause|step|speed|status
 
 agent-sim run <recipe>                # Execute recipe from config
@@ -68,7 +66,9 @@ agent-sim session [list]              # Session info
 agent-sim close                       # Shut down daemon
 ```
 
-Global flags: `--json`, `--session <name>`, `--instance <index>`, `--config <path>`.
+Global flags: `--json`, `--session <name>`, `--config <path>`.
+
+`load` is a bootstrap command: one session daemon is permanently bound to one DLL for its lifetime. To run a different DLL or a second device, use a different `--session`.
 
 ## Configuration
 
