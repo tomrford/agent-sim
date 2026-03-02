@@ -27,27 +27,14 @@ pub enum Action {
     Load {
         libpath: String,
     },
-    Unload,
     Info,
     Signals,
-    InstanceNew,
-    InstanceList,
-    InstanceSelect {
-        index: u32,
-    },
-    InstanceReset {
-        index: Option<u32>,
-    },
-    InstanceFree {
-        index: u32,
-    },
+    Reset,
     Get {
         selectors: Vec<String>,
-        instance: Option<u32>,
     },
     Set {
         writes: BTreeMap<String, String>,
-        instance: Option<u32>,
     },
     TimeStart,
     TimePause,
@@ -62,7 +49,6 @@ pub enum Action {
         selector: String,
         interval_ms: u64,
         samples: Option<u32>,
-        instance: Option<u32>,
     },
     RunRecipe {
         recipe: String,
@@ -111,32 +97,19 @@ pub enum ResponseData {
     Loaded {
         libpath: String,
         signal_count: usize,
-        instance_count: usize,
     },
     ProjectInfo {
-        loaded: bool,
-        libpath: Option<String>,
-        tick_duration_us: Option<u32>,
+        libpath: String,
+        tick_duration_us: u32,
         signal_count: usize,
-        instance_count: usize,
-        active_instance: Option<u32>,
     },
     Signals {
         signals: Vec<SignalData>,
     },
-    Instances {
-        instances: Vec<InstanceData>,
-        active_instance: Option<u32>,
-    },
-    SelectedInstance {
-        active_instance: u32,
-    },
     SignalValues {
-        instance: u32,
         values: Vec<SignalValueData>,
     },
     SetResult {
-        instance: u32,
         writes_applied: usize,
     },
     TimeStatus {
@@ -181,11 +154,6 @@ pub struct SignalData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstanceData {
-    pub index: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalValueData {
     pub id: u32,
     pub name: String,
@@ -198,7 +166,6 @@ pub struct SignalValueData {
 pub struct WatchSampleData {
     pub tick: u64,
     pub time_us: u64,
-    pub instance: u32,
     pub signal: String,
     pub value: SignalValue,
 }
@@ -262,7 +229,6 @@ mod tests {
                     ("hvac.power".to_string(), "true".to_string()),
                     ("hvac.target_temp".to_string(), "21.5".to_string()),
                 ]),
-                instance: Some(0),
             },
         };
         let encoded_request =
@@ -270,8 +236,7 @@ mod tests {
         let decoded_request: Request =
             serde_json::from_str(&encoded_request).expect("request should deserialize from json");
         match decoded_request.action {
-            Action::Set { writes, instance } => {
-                assert_eq!(instance, Some(0));
+            Action::Set { writes } => {
                 assert_eq!(writes.len(), 2);
             }
             other => panic!("expected set action, got {other:?}"),
@@ -280,7 +245,6 @@ mod tests {
         let response = Response::ok(
             request.id,
             ResponseData::SetResult {
-                instance: 0,
                 writes_applied: 2,
             },
         );

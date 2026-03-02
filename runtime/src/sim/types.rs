@@ -1,16 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::c_char;
 
-#[repr(C)]
-pub struct SimCtx {
-    _private: [u8; 0],
-}
-
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimStatusRaw {
     Ok = 0,
-    InvalidCtx = 1,
+    NotInitialized = 1,
     InvalidArg = 2,
     InvalidSignal = 3,
     TypeMismatch = 4,
@@ -24,7 +19,7 @@ impl TryFrom<u32> for SimStatusRaw {
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Ok),
-            1 => Ok(Self::InvalidCtx),
+            1 => Ok(Self::NotInitialized),
             2 => Ok(Self::InvalidArg),
             3 => Ok(Self::InvalidSignal),
             4 => Ok(Self::TypeMismatch),

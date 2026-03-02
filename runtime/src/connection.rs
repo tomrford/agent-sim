@@ -1,6 +1,6 @@
 use crate::daemon::error::DaemonError;
-use crate::daemon::lifecycle::{ensure_daemon_running, socket_path};
-use crate::protocol::{Request, Response};
+use crate::daemon::lifecycle::{bootstrap_daemon, ensure_daemon_running, socket_path};
+use crate::protocol::{Action, Request, Response};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -21,7 +21,10 @@ pub enum ConnectionError {
 }
 
 pub async fn send_request(session: &str, request: &Request) -> Result<Response, ConnectionError> {
-    ensure_daemon_running(session).await?;
+    match &request.action {
+        Action::Load { libpath } => bootstrap_daemon(session, libpath).await?,
+        _ => ensure_daemon_running(session).await?,
+    }
     let socket = socket_path(session);
     let payload = {
         let mut line = serde_json::to_string(request)?;

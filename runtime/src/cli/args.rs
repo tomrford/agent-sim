@@ -24,9 +24,9 @@ pub struct CliArgs {
     )]
     pub session: String,
 
-    /// Override active instance for this command
-    #[arg(long, global = true, env = "AGENT_SIM_INSTANCE")]
-    pub instance: Option<u32>,
+    /// Internal daemon startup DLL path
+    #[arg(long, global = true, hide = true)]
+    pub libpath: Option<String>,
 
     /// Config file path
     #[arg(long, global = true, env = "AGENT_SIM_CONFIG")]
@@ -39,16 +39,15 @@ pub struct CliArgs {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Load { libpath: String },
-    Unload,
     Info,
     Signals,
+    Reset,
     Get(GetArgs),
     Set(SetArgs),
     Watch(WatchArgs),
     Run(RunArgs),
     Close,
     Session(SessionArgs),
-    Instance(InstanceArgs),
     Time(TimeArgs),
 }
 
@@ -61,21 +60,6 @@ pub struct SessionArgs {
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     List,
-}
-
-#[derive(Debug, Args)]
-pub struct InstanceArgs {
-    #[command(subcommand)]
-    pub command: InstanceCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum InstanceCommand {
-    New,
-    List,
-    Select { index: u32 },
-    Reset { index: Option<u32> },
-    Free { index: u32 },
 }
 
 #[derive(Debug, Args)]

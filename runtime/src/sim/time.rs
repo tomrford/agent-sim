@@ -1,6 +1,5 @@
 use crate::protocol::TimeStateData;
 use crate::sim::error::{SimError, TimeError};
-use crate::sim::instance_manager::InstanceManager;
 use crate::sim::project::Project;
 use std::time::Instant;
 
@@ -45,8 +44,8 @@ impl TimeEngine {
         *self = Self::default();
     }
 
-    pub fn status(&self, tick_duration_us: Option<u32>) -> TimeStatus {
-        let tick_us = tick_duration_us.unwrap_or(0) as u64;
+    pub fn status(&self, tick_duration_us: u32) -> TimeStatus {
+        let tick_us = tick_duration_us as u64;
         TimeStatus {
             state: self.state,
             elapsed_ticks: self.elapsed_ticks,
@@ -89,7 +88,6 @@ impl TimeEngine {
     pub fn step(
         &mut self,
         project: &Project,
-        instances: &InstanceManager,
         duration_us: u64,
     ) -> Result<StepResult, TimeError> {
         if self.state == TimeStateData::Running {
@@ -101,8 +99,7 @@ impl TimeEngine {
         } else {
             duration_us / tick_us
         };
-        self.tick_all(project, instances, ticks)
-            .map_err(|_| TimeError::ProjectNotLoaded)?;
+        self.tick_for(project, ticks).map_err(TimeError::from)?;
         let advanced_us = ticks.saturating_mul(tick_us);
         Ok(StepResult {
             requested_us: duration_us,
@@ -111,11 +108,7 @@ impl TimeEngine {
         })
     }
 
-    pub fn tick_realtime(
-        &mut self,
-        project: &Project,
-        instances: &InstanceManager,
-    ) -> Result<u64, SimError> {
+    pub fn tick_realtime(&mut self, project: &Project) -> Result<u64, SimError> {
         if self.state != TimeStateData::Running {
             return Ok(0);
         }
@@ -137,20 +130,13 @@ impl TimeEngine {
             return Ok(0);
         }
         self.remainder_us -= ticks as f64 * tick_us;
-        self.tick_all(project, instances, ticks)?;
+        self.tick_for(project, ticks)?;
         Ok(ticks)
     }
 
-    fn tick_all(
-        &mut self,
-        project: &Project,
-        instances: &InstanceManager,
-        ticks: u64,
-    ) -> Result<(), SimError> {
+    fn tick_for(&mut self, project: &Project, ticks: u64) -> Result<(), SimError> {
         for _ in 0..ticks {
-            for ctx in instances.iter_ctxs() {
-                project.tick_ctx(ctx)?;
-            }
+            project.tick()?;
             self.elapsed_ticks = self.elapsed_ticks.saturating_add(1);
         }
         Ok(())

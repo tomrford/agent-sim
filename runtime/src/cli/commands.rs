@@ -1,4 +1,4 @@
-use crate::cli::args::{CliArgs, Command, InstanceCommand, SessionCommand, SetArgs, TimeCommand};
+use crate::cli::args::{CliArgs, Command, SessionCommand, SetArgs, TimeCommand};
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
 use std::collections::BTreeMap;
@@ -10,22 +10,19 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Load { libpath } => Action::Load {
             libpath: libpath.clone(),
         },
-        Command::Unload => Action::Unload,
         Command::Info => Action::Info,
         Command::Signals => Action::Signals,
+        Command::Reset => Action::Reset,
         Command::Get(get) => Action::Get {
             selectors: get.selectors.clone(),
-            instance: args.instance,
         },
         Command::Set(set) => Action::Set {
             writes: parse_set_entries(set)?,
-            instance: args.instance,
         },
         Command::Watch(watch) => Action::Watch {
             selector: watch.selector.clone(),
             interval_ms: watch.interval_ms,
             samples: watch.samples,
-            instance: args.instance,
         },
         Command::Run(run) => Action::RunRecipe {
             recipe: run.recipe_name.clone(),
@@ -36,13 +33,6 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Session(session) => match session.command {
             Some(SessionCommand::List) => Action::SessionList,
             None => Action::SessionStatus,
-        },
-        Command::Instance(instance) => match &instance.command {
-            InstanceCommand::New => Action::InstanceNew,
-            InstanceCommand::List => Action::InstanceList,
-            InstanceCommand::Select { index } => Action::InstanceSelect { index: *index },
-            InstanceCommand::Reset { index } => Action::InstanceReset { index: *index },
-            InstanceCommand::Free { index } => Action::InstanceFree { index: *index },
         },
         Command::Time(time) => match &time.command {
             TimeCommand::Start => Action::TimeStart,
