@@ -8,9 +8,8 @@ The shared C ABI is defined in `include/sim_api.h`. Every DLL must export:
 
 | Symbol                     | Purpose                      |
 | -------------------------- | ---------------------------- |
-| `sim_new`                  | Allocate a new `SimCtx*`     |
-| `sim_free`                 | Destroy a context            |
-| `sim_reset`                | Reset context to defaults    |
+| `sim_init`                 | Initialize deterministic startup state |
+| `sim_reset`                | Reset state to defaults      |
 | `sim_tick`                 | Advance one simulation step  |
 | `sim_read_val`             | Read a signal value          |
 | `sim_write_val`            | Write a signal value         |
@@ -20,8 +19,8 @@ The shared C ABI is defined in `include/sim_api.h`. Every DLL must export:
 
 Key rules:
 
-- `SimCtx*` is opaque. One context = one simulated device.
-- Serialize all calls per context (not thread-safe).
+- State is singleton per loaded DLL process (no exported context handles).
+- Serialize calls into a loaded DLL (not thread-safe).
 - Signal IDs/types are discovered at runtime — never hardcode across builds.
 - Use `sim_get_tick_duration_us` for the tick quantum; don't assume a fixed value.
 
@@ -48,9 +47,9 @@ Set `pub const TickDurationUs` in `adapter.zig`. The runtime reads this via `sim
 
 1. `dlopen` + bind symbols
 2. Query tick duration + signal catalog
-3. Create one or more contexts (`sim_new`)
+3. Initialize state (`sim_init`)
 4. Per step: write inputs → `sim_tick` → read outputs
-5. `sim_free` contexts, `dlclose`
+5. `dlclose`
 
 ## Example
 

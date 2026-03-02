@@ -251,8 +251,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
         Action::Set { writes } => {
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
-                let ids = DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                let ids =
+                    DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
+                        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
                 for id in ids {
                     let signal = state
                         .project
@@ -328,8 +329,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             interval_ms,
             samples,
         } => {
-            let ids = DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+            let ids =
+                DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
+                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
             let id = *ids
                 .first()
                 .ok_or_else(|| SimError::InvalidSignal(selector.clone()).to_string())?;

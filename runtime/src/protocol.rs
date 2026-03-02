@@ -242,12 +242,7 @@ mod tests {
             other => panic!("expected set action, got {other:?}"),
         }
 
-        let response = Response::ok(
-            request.id,
-            ResponseData::SetResult {
-                writes_applied: 2,
-            },
-        );
+        let response = Response::ok(request.id, ResponseData::SetResult { writes_applied: 2 });
         let encoded_response =
             serde_json::to_string(&response).expect("response should serialize to json");
         let decoded_response: Response =

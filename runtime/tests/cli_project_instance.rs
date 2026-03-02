@@ -6,9 +6,9 @@ use common::{
 };
 
 #[test]
-fn load_info_and_instance_workflow() {
+fn load_info_and_reset_workflow() {
     ensure_fixtures_built();
-    let session = unique_session("project-instance");
+    let session = unique_session("project-singleton");
     let libpath = template_lib_path();
     let libpath = libpath
         .to_str()
@@ -21,18 +21,15 @@ fn load_info_and_instance_workflow() {
     let info_out = run_agent(&["--session", &session, "info"]);
     assert!(info_out.contains("Loaded: true"));
     assert!(info_out.contains("Signals: 2"));
-    assert!(info_out.contains("Instances: 1"));
 
-    let _new_out = run_agent(&["--session", &session, "instance", "new"]);
-    let list_out = run_agent(&["--session", &session, "instance", "list"]);
-    assert!(list_out.contains("0"));
-    assert!(list_out.contains("1"));
+    let _ = run_agent(&["--session", &session, "set", "demo.input", "4.0"]);
+    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
+    let value_before_reset = run_agent(&["--session", &session, "get", "demo.output"]);
+    assert!(value_before_reset.contains("8"));
 
-    let select_out = run_agent(&["--session", &session, "instance", "select", "1"]);
-    assert!(select_out.contains("Active instance: 1"));
-
-    let free_out = run_agent(&["--session", &session, "instance", "free", "1"]);
-    assert!(free_out.contains("0"));
+    let _ = run_agent(&["--session", &session, "reset"]);
+    let value_after_reset = run_agent(&["--session", &session, "get", "demo.output"]);
+    assert!(value_after_reset.contains("0"));
 
     let _ = run_agent(&["--session", &session, "close"]);
 }
@@ -50,6 +47,26 @@ fn load_invalid_library_path_returns_error() {
         err.contains("library load failed"),
         "expected load error for invalid library path, got: {err}"
     );
+}
+
+#[test]
+fn second_load_same_session_is_rejected() {
+    ensure_fixtures_built();
+    let session = unique_session("project-singleton-reload");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let err = run_agent_fail(&["--session", &session, "load", &libpath]);
+    assert!(
+        err.contains("already has a running daemon"),
+        "expected singleton daemon load rejection, got: {err}"
+    );
+
+    let _ = run_agent(&["--session", &session, "close"]);
 }
 
 #[test]

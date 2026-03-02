@@ -27,3 +27,13 @@ fn session_state_persists_across_invocations() {
 
     let _ = run_agent(&["--session", &session, "close"]);
 }
+
+#[test]
+fn commands_fail_when_session_not_loaded() {
+    let session = unique_session("session-not-running");
+    let output = common::run_agent_fail(&["--session", &session, "info"]);
+    assert!(
+        output.contains("run `agent-sim load <libpath>` first"),
+        "expected not-running guidance, got: {output}"
+    );
+}
