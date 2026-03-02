@@ -37,3 +37,31 @@ fn commands_fail_when_session_not_loaded() {
         "expected not-running guidance, got: {output}"
     );
 }
+
+#[test]
+fn multiple_sessions_run_independent_device_states() {
+    ensure_fixtures_built();
+    let session_a = unique_session("session-a");
+    let session_b = unique_session("session-b");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--session", &session_a, "load", &libpath]);
+    let _ = run_agent(&["--session", &session_b, "load", &libpath]);
+
+    let _ = run_agent(&["--session", &session_a, "set", "demo.input", "3.0"]);
+    let _ = run_agent(&["--session", &session_a, "time", "step", "20us"]);
+    let out_a = run_agent(&["--session", &session_a, "get", "demo.output"]);
+    assert!(out_a.contains("6"), "expected session A output 6, got: {out_a}");
+
+    let _ = run_agent(&["--session", &session_b, "set", "demo.input", "9.0"]);
+    let _ = run_agent(&["--session", &session_b, "time", "step", "20us"]);
+    let out_b = run_agent(&["--session", &session_b, "get", "demo.output"]);
+    assert!(out_b.contains("18"), "expected session B output 18, got: {out_b}");
+
+    let _ = run_agent(&["--session", &session_a, "close"]);
+    let _ = run_agent(&["--session", &session_b, "close"]);
+}
