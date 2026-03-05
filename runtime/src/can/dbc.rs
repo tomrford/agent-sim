@@ -125,7 +125,8 @@ pub fn encode_signal(
             signal.name
         ));
     }
-    if value < signal.min || value > signal.max {
+    let has_explicit_range = signal.min != 0.0 || signal.max != 0.0;
+    if has_explicit_range && (value < signal.min || value > signal.max) {
         return Err(format!(
             "value {value} is out of DBC range [{}, {}] for CAN signal '{}'",
             signal.min, signal.max, signal.name
@@ -301,5 +302,56 @@ fn signed_from_raw(raw: u64, bits: u64) -> i64 {
         raw as i64
     } else {
         (raw as i64) - ((1_u64 << bits) as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_signal(min: f64, max: f64) -> DbcSignalDef {
+        DbcSignalDef {
+            name: "EngineRPM".to_string(),
+            frame_key: 0x123,
+            arb_id: 0x123,
+            extended: false,
+            message_size: 8,
+            start_bit: 0,
+            size: 16,
+            byte_order: ByteOrder::LittleEndian,
+            value_type: ValueType::Unsigned,
+            factor: 0.25,
+            offset: 0.0,
+            min,
+            max,
+            unit: Some("RPM".to_string()),
+        }
+    }
+
+    fn empty_frame() -> SimCanFrame {
+        SimCanFrame {
+            arb_id: 0x123,
+            len: 0,
+            flags: 0,
+            data: [0; 64],
+        }
+    }
+
+    #[test]
+    fn encode_signal_allows_nonzero_with_unspecified_dbc_range() {
+        let signal = sample_signal(0.0, 0.0);
+        let mut frame = empty_frame();
+        encode_signal(&mut frame, &signal, 1500.0)
+            .expect("value should encode when DBC range is unspecified [0|0]");
+        let decoded = decode_signal(&frame, &signal).expect("encoded signal should decode");
+        assert!((decoded - 1500.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn encode_signal_rejects_values_outside_explicit_dbc_range() {
+        let signal = sample_signal(0.0, 250.0);
+        let mut frame = empty_frame();
+        let err = encode_signal(&mut frame, &signal, 1500.0).expect_err("value should be rejected");
+        assert!(err.contains("out of DBC range [0, 250]"));
     }
 }
