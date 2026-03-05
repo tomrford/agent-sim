@@ -558,7 +558,7 @@ fn compare_eq(actual: &SignalValue, expected: &toml::Value) -> Result<bool, Stri
         (SignalValue::Bool(a), toml::Value::Boolean(b)) => Ok(*a == *b),
         (SignalValue::U32(a), toml::Value::Integer(b)) => Ok((*a as i64) == *b),
         (SignalValue::I32(a), toml::Value::Integer(b)) => Ok((*a as i64) == *b),
-        (SignalValue::F32(a), toml::Value::Float(b)) => Ok((*a as f64) == *b),
+        (SignalValue::F32(a), toml::Value::Float(b)) => Ok(*a == (*b as f32)),
         (SignalValue::F64(a), toml::Value::Float(b)) => Ok(*a == *b),
         (_, toml::Value::Float(b)) => signal_value_as_f64(actual)
             .map(|a| a == *b)
@@ -584,8 +584,9 @@ fn signal_value_as_f64(value: &SignalValue) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecipeOp, compile_for_step, validate_assert_spec};
+    use super::{RecipeOp, compare_eq, compile_for_step, validate_assert_spec};
     use crate::config::recipe::{AssertSpec, ForSpec};
+    use crate::sim::types::SignalValue;
 
     #[test]
     fn compile_for_step_uses_stable_iteration_count_for_fractional_steps() {
@@ -657,5 +658,21 @@ mod tests {
         )
         .expect_err("approx without tolerance should fail");
         assert!(err.contains("explicit tolerance"));
+    }
+
+    #[test]
+    fn compare_eq_f32_decimal_literal_matches_f32_value() {
+        let actual = SignalValue::F32(0.1_f32);
+        let expected = toml::Value::Float(0.1_f64);
+        let equal = compare_eq(&actual, &expected).expect("f32 eq comparison should succeed");
+        assert!(equal, "0.1_f32 should equal TOML float literal 0.1");
+    }
+
+    #[test]
+    fn compare_eq_f32_decimal_literal_detects_real_mismatch() {
+        let actual = SignalValue::F32(0.1_f32);
+        let expected = toml::Value::Float(0.2_f64);
+        let equal = compare_eq(&actual, &expected).expect("f32 eq comparison should succeed");
+        assert!(!equal, "0.1_f32 should not equal TOML float literal 0.2");
     }
 }
