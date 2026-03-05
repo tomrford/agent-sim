@@ -28,6 +28,10 @@ pub struct CliArgs {
     #[arg(long, global = true, hide = true)]
     pub libpath: Option<String>,
 
+    /// Internal env tag metadata for daemon startup
+    #[arg(long, global = true, hide = true)]
+    pub env_tag: Option<String>,
+
     /// Config file path
     #[arg(long, global = true, env = "AGENT_SIM_CONFIG")]
     pub config: Option<String>,
@@ -38,23 +42,91 @@ pub struct CliArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Load { libpath: String },
+    Load(LoadArgs),
     Info,
     Signals,
+    Can(CanArgs),
+    Shared(SharedArgs),
     Reset,
     Get(GetArgs),
     Set(SetArgs),
     Watch(WatchArgs),
     Run(RunArgs),
-    Close,
+    Close(CloseArgs),
+    Env(EnvArgs),
     Session(SessionArgs),
     Time(TimeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LoadArgs {
+    pub libpath: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CloseArgs {
+    #[arg(long, default_value_t = false)]
+    pub all: bool,
+    #[arg(long)]
+    pub env: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct EnvArgs {
+    #[command(subcommand)]
+    pub command: EnvCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvCommand {
+    Start { name: String },
 }
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
     #[command(subcommand)]
     pub command: Option<SessionCommand>,
+}
+
+#[derive(Debug, Args)]
+pub struct CanArgs {
+    #[command(subcommand)]
+    pub command: CanCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CanCommand {
+    Buses,
+    Attach {
+        bus: String,
+        vcan_iface: String,
+    },
+    Detach {
+        bus: String,
+    },
+    LoadDbc {
+        bus: String,
+        path: String,
+    },
+    Send {
+        bus: String,
+        arb_id: String,
+        data_hex: String,
+        #[arg(long)]
+        flags: Option<u8>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct SharedArgs {
+    #[command(subcommand)]
+    pub command: SharedCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SharedCommand {
+    List,
+    Get { channel: String },
 }
 
 #[derive(Debug, Subcommand)]

@@ -1,34 +1,72 @@
-use crate::config::load_config;
-use crate::config::recipe::{ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
-use crate::protocol::{
-    Action, Request, Response, ResponseData, SessionInfoData, SignalData, SignalValueData,
-    WatchSampleData, parse_duration_us,
-};
+#[path = "server/action_router.rs"]
+mod action_router;
+#[path = "server/can_ops.rs"]
+mod can_ops;
+#[path = "server/shared_ops.rs"]
+mod shared_ops;
+#[path = "server/tick_ops.rs"]
+mod tick_ops;
+
+use crate::can::CanSocket;
+use crate::can::dbc::DbcBusOverlay;
+use crate::protocol::{Request, Response};
+use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
 use crate::sim::project::Project;
 use crate::sim::time::TimeEngine;
-use crate::sim::types::{SignalType, SignalValue};
+use crate::sim::types::{SignalType, SignalValue, SimCanBusDesc, SimCanFrame, SimSharedDesc};
 use globset::{Glob, GlobMatcher};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub struct DaemonState {
     session: String,
     socket_path: PathBuf,
+    env: Option<String>,
     project: Project,
+    can_attached: HashMap<String, AttachedCanBus>,
+    shared_attached: HashMap<String, AttachedSharedChannel>,
+    dbc_overlays: HashMap<String, DbcBusOverlay>,
+    frame_state: HashMap<String, HashMap<u32, SimCanFrame>>,
     time: TimeEngine,
     shutdown: bool,
 }
 
+struct AttachedCanBus {
+    meta: SimCanBusDesc,
+    socket: CanSocket,
+}
+
+struct AttachedSharedChannel {
+    meta: SimSharedDesc,
+    region: SharedRegion,
+    writer: bool,
+}
+
+struct ActionMessage {
+    request: Request,
+    response_tx: oneshot::Sender<Response>,
+}
+
 impl DaemonState {
-    pub fn new(session: String, socket_path: PathBuf, project: Project) -> Self {
+    pub fn new(
+        session: String,
+        socket_path: PathBuf,
+        project: Project,
+        env: Option<String>,
+    ) -> Self {
         Self {
             session,
             socket_path,
+            env,
             project,
+            can_attached: HashMap::new(),
+            shared_attached: HashMap::new(),
+            dbc_overlays: HashMap::new(),
+            frame_state: HashMap::new(),
             time: TimeEngine::default(),
             shutdown: false,
         }
@@ -114,6 +152,7 @@ pub async fn run_listener(
     session: String,
     socket_path: PathBuf,
     project: Project,
+    env: Option<String>,
 ) -> Result<(), std::io::Error> {
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
@@ -124,23 +163,44 @@ pub async fn run_listener(
     let listener = UnixListener::bind(&socket_path)?;
     let pid_path = crate::daemon::lifecycle::pid_path(&session);
     std::fs::write(&pid_path, std::process::id().to_string())?;
+    crate::daemon::lifecycle::write_env_tag(&session, env.as_deref())
+        .map_err(std::io::Error::other)?;
 
-    let mut state = DaemonState::new(session, socket_path.clone(), project);
+    let state = DaemonState::new(session.clone(), socket_path.clone(), project, env);
+    let (action_tx, action_rx) = mpsc::channel::<ActionMessage>(256);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let tick_task = tokio::spawn(tick_ops::run_tick_task(state, action_rx, shutdown_tx));
+    let mut listener_error = None;
+
     loop {
-        let _ = state.time.tick_realtime(&state.project);
-
-        let accepted = timeout(Duration::from_millis(20), listener.accept()).await;
-        match accepted {
-            Ok(Ok((stream, _addr))) => {
-                handle_connection(stream, &mut state).await?;
-                if state.shutdown {
-                    break;
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                match changed {
+                    Ok(()) if *shutdown_rx.borrow() => break,
+                    Ok(()) => {}
+                    Err(_) => break,
                 }
             }
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {}
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _addr)) => {
+                        let action_tx = action_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle_connection(stream, action_tx).await;
+                        });
+                    }
+                    Err(e) => {
+                        listener_error = Some(e);
+                        break;
+                    }
+                }
+            }
         }
     }
+
+    drop(action_tx);
+    let _ = tick_task.await;
 
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
@@ -148,12 +208,17 @@ pub async fn run_listener(
     if pid_path.exists() {
         let _ = std::fs::remove_file(pid_path);
     }
+    crate::daemon::lifecycle::remove_env_tag(&session);
+
+    if let Some(err) = listener_error {
+        return Err(err);
+    }
     Ok(())
 }
 
 async fn handle_connection(
     mut stream: UnixStream,
-    state: &mut DaemonState,
+    action_tx: mpsc::Sender<ActionMessage>,
 ) -> Result<(), std::io::Error> {
     let mut line = String::new();
     let mut reader = BufReader::new(&mut stream);
@@ -162,7 +227,25 @@ async fn handle_connection(
         return Ok(());
     }
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => handle_action(request, state).await,
+        Ok(request) => {
+            let request_id = request.id;
+            let (response_tx, response_rx) = oneshot::channel();
+            if action_tx
+                .send(ActionMessage {
+                    request,
+                    response_tx,
+                })
+                .await
+                .is_err()
+            {
+                Response::err(request_id, "daemon unavailable")
+            } else {
+                match response_rx.await {
+                    Ok(response) => response,
+                    Err(_) => Response::err(request_id, "daemon unavailable"),
+                }
+            }
+        }
         Err(e) => Response {
             id: uuid::Uuid::new_v4(),
             success: false,
@@ -179,346 +262,17 @@ async fn handle_connection(
     Ok(())
 }
 
+async fn process_action_message(message: ActionMessage, state: &mut DaemonState) {
+    let response = handle_action(message.request, state).await;
+    let _ = message.response_tx.send(response);
+}
+
 async fn handle_action(request: Request, state: &mut DaemonState) -> Response {
     let id = request.id;
-    let result = dispatch_action(request.action, state).await;
+    let result = action_router::dispatch_action(request.action, state).await;
 
     match result {
         Ok(data) => Response::ok(id, data),
         Err(e) => Response::err(id, e),
     }
-}
-
-#[async_recursion::async_recursion]
-async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<ResponseData, String> {
-    match action {
-        Action::Ping => Ok(ResponseData::Ack),
-        Action::Load { libpath } => {
-            let bound = state.project.libpath.display().to_string();
-            if libpath != bound {
-                return Err(format!(
-                    "daemon already bound to '{bound}'; start a new session for a different DLL"
-                ));
-            }
-            Ok(ResponseData::Loaded {
-                libpath: bound,
-                signal_count: state.project.signals().len(),
-            })
-        }
-        Action::Info => Ok(ResponseData::ProjectInfo {
-            libpath: state.project.libpath.display().to_string(),
-            tick_duration_us: state.project.tick_duration_us(),
-            signal_count: state.project.signals().len(),
-        }),
-        Action::Signals => {
-            let signals = state
-                .project
-                .signals()
-                .iter()
-                .map(|s| SignalData {
-                    id: s.id,
-                    name: s.name.clone(),
-                    signal_type: s.signal_type,
-                    units: s.units.clone(),
-                })
-                .collect::<Vec<_>>();
-            Ok(ResponseData::Signals { signals })
-        }
-        Action::Reset => {
-            state.project.reset().map_err(|e| e.to_string())?;
-            Ok(ResponseData::Ack)
-        }
-        Action::Get { selectors } => {
-            let ids = DaemonState::select_signal_ids(&state.project, &selectors)
-                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
-            let mut values = Vec::new();
-            for id in ids {
-                let signal = state
-                    .project
-                    .signal_by_id(id)
-                    .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
-                let value = state.project.read(signal).map_err(|e| e.to_string())?;
-                values.push(SignalValueData {
-                    id: signal.id,
-                    name: signal.name.clone(),
-                    signal_type: signal.signal_type,
-                    value,
-                    units: signal.units.clone(),
-                });
-            }
-            Ok(ResponseData::SignalValues { values })
-        }
-        Action::Set { writes } => {
-            let mut applied = 0_usize;
-            for (selector, raw_value) in writes {
-                let ids =
-                    DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
-                for id in ids {
-                    let signal = state
-                        .project
-                        .signal_by_id(id)
-                        .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
-                    let value = DaemonState::parse_value(signal.signal_type, &raw_value)
-                        .map_err(|e| e.to_string())?;
-                    state
-                        .project
-                        .write(signal, &value)
-                        .map_err(|e| e.to_string())?;
-                    applied += 1;
-                }
-            }
-            Ok(ResponseData::SetResult {
-                writes_applied: applied,
-            })
-        }
-        Action::TimeStart => {
-            state.time.start().map_err(|e| e.to_string())?;
-            let status = state.time.status(state.project.tick_duration_us());
-            Ok(ResponseData::TimeStatus {
-                state: status.state,
-                elapsed_ticks: status.elapsed_ticks,
-                elapsed_time_us: status.elapsed_time_us,
-                speed: status.speed,
-            })
-        }
-        Action::TimePause => {
-            state.time.pause().map_err(|e| e.to_string())?;
-            let status = state.time.status(state.project.tick_duration_us());
-            Ok(ResponseData::TimeStatus {
-                state: status.state,
-                elapsed_ticks: status.elapsed_ticks,
-                elapsed_time_us: status.elapsed_time_us,
-                speed: status.speed,
-            })
-        }
-        Action::TimeStep { duration } => {
-            let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
-            let step = state
-                .time
-                .step(&state.project, duration_us)
-                .map_err(|e| e.to_string())?;
-            Ok(ResponseData::TimeAdvanced {
-                requested_us: step.requested_us,
-                advanced_ticks: step.advanced_ticks,
-                advanced_us: step.advanced_us,
-            })
-        }
-        Action::TimeSpeed { multiplier } => {
-            if let Some(multiplier) = multiplier {
-                state
-                    .time
-                    .set_speed(multiplier)
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(ResponseData::Speed {
-                speed: state.time.speed(),
-            })
-        }
-        Action::TimeStatus => {
-            let status = state.time.status(state.project.tick_duration_us());
-            Ok(ResponseData::TimeStatus {
-                state: status.state,
-                elapsed_ticks: status.elapsed_ticks,
-                elapsed_time_us: status.elapsed_time_us,
-                speed: status.speed,
-            })
-        }
-        Action::Watch {
-            selector,
-            interval_ms,
-            samples,
-        } => {
-            let ids =
-                DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
-            let id = *ids
-                .first()
-                .ok_or_else(|| SimError::InvalidSignal(selector.clone()).to_string())?;
-            let signal = state
-                .project
-                .signal_by_id(id)
-                .ok_or_else(|| SimError::InvalidSignal(selector.clone()).to_string())?
-                .clone();
-            let count = samples.unwrap_or(10).max(1);
-            let mut out = Vec::new();
-            for _ in 0..count {
-                let value = state.project.read(&signal).map_err(|e| e.to_string())?;
-                let status = state.time.status(state.project.tick_duration_us());
-                out.push(WatchSampleData {
-                    tick: status.elapsed_ticks,
-                    time_us: status.elapsed_time_us,
-                    signal: signal.name.clone(),
-                    value,
-                });
-                sleep(Duration::from_millis(interval_ms.max(1))).await;
-            }
-            Ok(ResponseData::WatchSamples { samples: out })
-        }
-        Action::RunRecipe {
-            recipe,
-            dry_run,
-            config,
-        } => {
-            let mut events = Vec::new();
-            let config =
-                load_config(config.as_deref().map(Path::new)).map_err(|e| e.to_string())?;
-            let recipe_def = config.recipe(&recipe).map_err(|e| e.to_string())?;
-            for step in &recipe_def.steps {
-                execute_recipe_step(step, dry_run, state, &mut events)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(ResponseData::RecipeResult {
-                recipe,
-                dry_run,
-                steps_executed: recipe_def.steps.len(),
-                events,
-            })
-        }
-        Action::SessionStatus => Ok(ResponseData::SessionStatus {
-            session: state.session.clone(),
-            socket_path: state.socket_path.display().to_string(),
-            running: true,
-        }),
-        Action::SessionList => {
-            let sessions = crate::daemon::lifecycle::list_sessions()
-                .await
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(name, socket_path, running)| SessionInfoData {
-                    name,
-                    socket_path: socket_path.display().to_string(),
-                    running,
-                })
-                .collect::<Vec<_>>();
-            Ok(ResponseData::SessionList { sessions })
-        }
-        Action::Close => {
-            state.shutdown = true;
-            Ok(ResponseData::Ack)
-        }
-    }
-}
-
-#[async_recursion::async_recursion]
-async fn execute_recipe_step(
-    step: &RecipeStep,
-    dry_run: bool,
-    state: &mut DaemonState,
-    events: &mut Vec<String>,
-) -> Result<(), String> {
-    match step {
-        RecipeStep::Set { set } => {
-            let mut writes = BTreeMap::new();
-            for (key, value) in set {
-                writes.insert(
-                    key.clone(),
-                    toml_value_to_cli_string(value).map_err(|e| e.to_string())?,
-                );
-            }
-            events.push(format!("set {}", writes.len()));
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::Set { writes },
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::Step { step } => {
-            events.push(format!("step {step}"));
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::TimeStep {
-                        duration: step.clone(),
-                    },
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::Print { print } => {
-            let selectors = match print {
-                PrintSpec::All(value) if value == "*" => vec!["*".to_string()],
-                PrintSpec::All(value) => vec![value.clone()],
-                PrintSpec::Signals(values) => values.clone(),
-            };
-            events.push(format!("print {}", selectors.join(",")));
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::Get { selectors },
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::Speed { speed } => {
-            events.push(format!("speed {speed}"));
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::TimeSpeed {
-                        multiplier: Some(*speed),
-                    },
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::Reset { .. } => {
-            events.push("reset".to_string());
-            if !dry_run {
-                let req = Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: Action::Reset,
-                };
-                dispatch_action(req.action, state).await?;
-            }
-        }
-        RecipeStep::Sleep { sleep: ms } => {
-            events.push(format!("sleep {ms}ms"));
-            if !dry_run {
-                sleep(Duration::from_millis(*ms)).await;
-            }
-        }
-        RecipeStep::For { r#for } => execute_for_step(r#for, dry_run, state, events).await?,
-    }
-    Ok(())
-}
-
-#[async_recursion::async_recursion]
-async fn execute_for_step(
-    spec: &ForSpec,
-    dry_run: bool,
-    state: &mut DaemonState,
-    events: &mut Vec<String>,
-) -> Result<(), String> {
-    if spec.by == 0.0 {
-        return Err("for.by cannot be zero".to_string());
-    }
-    let mut current = spec.from;
-    let within_bounds = |v: f64| {
-        if spec.by > 0.0 {
-            v <= spec.to
-        } else {
-            v >= spec.to
-        }
-    };
-    while within_bounds(current) {
-        events.push(format!("for {}={current}", spec.signal));
-        if !dry_run {
-            let mut writes = BTreeMap::new();
-            writes.insert(spec.signal.clone(), current.to_string());
-            let req = Request {
-                id: uuid::Uuid::new_v4(),
-                action: Action::Set { writes },
-            };
-            dispatch_action(req.action, state).await?;
-        }
-        for step in &spec.each {
-            execute_recipe_step(step, dry_run, state, events).await?;
-        }
-        current += spec.by;
-    }
-    Ok(())
 }

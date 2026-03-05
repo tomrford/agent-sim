@@ -5,10 +5,20 @@ use thiserror::Error;
 pub enum ProjectError {
     #[error("library load failed: {0}")]
     LibraryLoad(String),
+    #[error("FFI contract violation: {0}")]
+    FfiContract(String),
     #[error("missing symbol: {0}")]
     MissingSymbol(&'static str),
     #[error("invalid signal metadata from project")]
     InvalidSignalMetadata,
+    #[error("invalid CAN exports: {0}")]
+    InvalidCanExports(String),
+    #[error("invalid shared-state exports: {0}")]
+    InvalidSharedExports(String),
+    #[error("invalid CAN metadata from project")]
+    InvalidCanMetadata,
+    #[error("invalid shared-state metadata from project")]
+    InvalidSharedMetadata,
 }
 
 #[derive(Debug, Error)]
@@ -17,6 +27,8 @@ pub enum SimError {
     NotInitialized,
     #[error("invalid argument: {0}")]
     InvalidArg(String),
+    #[error("FFI contract violation: {0}")]
+    FfiContract(String),
     #[error("signal not found: '{0}'")]
     InvalidSignal(String),
     #[error("type mismatch: signal '{name}' expects {expected}, got {actual}")]

@@ -200,3 +200,134 @@ pub struct SignalMeta {
     pub signal_type: SignalType,
     pub units: Option<String>,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SimCanFrameRaw {
+    pub arb_id: u32,
+    pub len: u8,
+    pub flags: u8,
+    pub _pad: [u8; 2],
+    pub data: [u8; 64],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SimCanBusDescRaw {
+    pub id: u32,
+    pub name: *const c_char,
+    pub bitrate: u32,
+    pub bitrate_data: u32,
+    pub flags: u8,
+    pub _pad: [u8; 3],
+}
+
+pub const CAN_FLAG_EXTENDED: u8 = 1 << 0;
+pub const CAN_FLAG_FD: u8 = 1 << 1;
+pub const CAN_FLAG_BRS: u8 = 1 << 2;
+pub const CAN_FLAG_ESI: u8 = 1 << 3;
+pub const CAN_FLAG_RTR: u8 = 1 << 4;
+pub const CAN_FLAG_RESERVED_MASK: u8 = 0b1110_0000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimCanFrame {
+    pub arb_id: u32,
+    pub len: u8,
+    pub flags: u8,
+    pub data: [u8; 64],
+}
+
+impl SimCanFrame {
+    pub fn to_raw(&self) -> SimCanFrameRaw {
+        SimCanFrameRaw {
+            arb_id: self.arb_id,
+            len: self.len,
+            flags: self.flags,
+            _pad: [0, 0],
+            data: self.data,
+        }
+    }
+
+    pub fn from_raw(raw: SimCanFrameRaw) -> Self {
+        Self {
+            arb_id: raw.arb_id,
+            len: raw.len,
+            flags: raw.flags,
+            data: raw.data,
+        }
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        let len = usize::from(self.len.min(64));
+        &self.data[..len]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimCanBusDesc {
+    pub id: u32,
+    pub name: String,
+    pub bitrate: u32,
+    pub bitrate_data: u32,
+    pub fd_capable: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SimSharedDescRaw {
+    pub id: u32,
+    pub name: *const c_char,
+    pub slot_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SimSharedSlotRaw {
+    pub slot_id: u32,
+    pub signal_type: u32,
+    pub value: SimValueRaw,
+}
+
+impl Default for SimSharedSlotRaw {
+    fn default() -> Self {
+        let value = SignalValue::F64(0.0).to_raw();
+        Self {
+            slot_id: 0,
+            signal_type: SimTypeRaw::F64 as u32,
+            value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimSharedDesc {
+    pub id: u32,
+    pub name: String,
+    pub slot_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimSharedSlot {
+    pub slot_id: u32,
+    pub value: SignalValue,
+}
+
+impl SimSharedSlot {
+    pub fn to_raw(&self) -> SimSharedSlotRaw {
+        let raw = self.value.to_raw();
+        SimSharedSlotRaw {
+            slot_id: self.slot_id,
+            signal_type: raw.signal_type,
+            value: raw,
+        }
+    }
+
+    pub fn from_raw(raw: SimSharedSlotRaw) -> Option<Self> {
+        let mut value = raw.value;
+        value.signal_type = raw.signal_type;
+        Some(Self {
+            slot_id: raw.slot_id,
+            value: unsafe { SignalValue::from_raw(value) }?,
+        })
+    }
+}

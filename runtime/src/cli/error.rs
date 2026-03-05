@@ -8,4 +8,6 @@ pub enum CliError {
     InvalidSetSyntax,
     #[error("command failed: {0}")]
     CommandFailed(String),
+    #[error("assertion failed: {0}")]
+    AssertionFailed(String),
 }

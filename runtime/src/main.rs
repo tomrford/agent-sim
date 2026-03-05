@@ -19,7 +19,7 @@ async fn main() -> std::process::ExitCode {
             eprintln!("daemon mode requires --libpath");
             return std::process::ExitCode::from(1);
         };
-        if let Err(err) = daemon::run(&args.session, libpath).await {
+        if let Err(err) = daemon::run(&args.session, libpath, args.env_tag.clone()).await {
             eprintln!("{err}");
             return std::process::ExitCode::from(1);
         }

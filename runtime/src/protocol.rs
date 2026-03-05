@@ -26,11 +26,15 @@ pub enum Action {
     Ping,
     Load {
         libpath: String,
+        env_tag: Option<String>,
     },
     Info,
     Signals,
     Reset,
     Get {
+        selectors: Vec<String>,
+    },
+    Sample {
         selectors: Vec<String>,
     },
     Set {
@@ -45,15 +49,33 @@ pub enum Action {
         multiplier: Option<f64>,
     },
     TimeStatus,
-    Watch {
-        selector: String,
-        interval_ms: u64,
-        samples: Option<u32>,
+    CanBuses,
+    CanAttach {
+        bus_name: String,
+        vcan_iface: String,
     },
-    RunRecipe {
-        recipe: String,
-        dry_run: bool,
-        config: Option<String>,
+    CanDetach {
+        bus_name: String,
+    },
+    CanLoadDbc {
+        bus_name: String,
+        path: String,
+    },
+    SharedList,
+    SharedAttach {
+        channel_name: String,
+        path: String,
+        writer: bool,
+        writer_session: String,
+    },
+    SharedGet {
+        channel_name: String,
+    },
+    CanSend {
+        bus_name: String,
+        arb_id: u32,
+        data_hex: String,
+        flags: Option<u8>,
     },
     SessionStatus,
     SessionList,
@@ -109,6 +131,11 @@ pub enum ResponseData {
     SignalValues {
         values: Vec<SignalValueData>,
     },
+    SignalSample {
+        tick: u64,
+        time_us: u64,
+        values: Vec<SignalValueData>,
+    },
     SetResult {
         writes_applied: usize,
     },
@@ -126,6 +153,25 @@ pub enum ResponseData {
     Speed {
         speed: f64,
     },
+    CanBuses {
+        buses: Vec<CanBusData>,
+    },
+    CanSend {
+        bus: String,
+        arb_id: u32,
+        len: u8,
+    },
+    DbcLoaded {
+        bus: String,
+        signal_count: usize,
+    },
+    SharedChannels {
+        channels: Vec<SharedChannelData>,
+    },
+    SharedValues {
+        channel: String,
+        slots: Vec<SharedSlotValueData>,
+    },
     WatchSamples {
         samples: Vec<WatchSampleData>,
     },
@@ -133,12 +179,13 @@ pub enum ResponseData {
         recipe: String,
         dry_run: bool,
         steps_executed: usize,
-        events: Vec<String>,
+        steps: Vec<RecipeStepResultData>,
     },
     SessionStatus {
         session: String,
         socket_path: String,
         running: bool,
+        env: Option<String>,
     },
     SessionList {
         sessions: Vec<SessionInfoData>,
@@ -182,6 +229,51 @@ pub struct SessionInfoData {
     pub name: String,
     pub socket_path: String,
     pub running: bool,
+    pub env: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanBusData {
+    pub id: u32,
+    pub name: String,
+    pub bitrate: u32,
+    pub bitrate_data: u32,
+    pub fd_capable: bool,
+    pub attached_iface: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedChannelData {
+    pub id: u32,
+    pub name: String,
+    pub slot_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedSlotValueData {
+    pub slot_id: u32,
+    pub signal_type: SignalType,
+    pub value: SignalValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipeStepKindData {
+    Set,
+    Step,
+    Print,
+    Speed,
+    Reset,
+    Sleep,
+    Assert,
+    ForIteration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeStepResultData {
+    pub kind: RecipeStepKindData,
+    pub session: Option<String>,
+    pub detail: String,
 }
 
 pub fn parse_duration_us(input: &str) -> Result<u64, ProtocolError> {

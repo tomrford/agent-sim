@@ -2,7 +2,7 @@ pub mod error;
 pub mod recipe;
 
 use crate::config::error::ConfigError;
-use crate::config::recipe::{FileConfig, RecipeDef, parse_config};
+use crate::config::recipe::{EnvDef, FileConfig, RecipeDef, parse_config};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -17,6 +17,13 @@ impl AppConfig {
             .recipe
             .get(name)
             .ok_or_else(|| ConfigError::MissingRecipe(name.to_string()))
+    }
+
+    pub fn env(&self, name: &str) -> Result<&EnvDef, ConfigError> {
+        self.file
+            .env
+            .get(name)
+            .ok_or_else(|| ConfigError::InvalidRecipeStep(format!("missing env: {name}")))
     }
 }
 

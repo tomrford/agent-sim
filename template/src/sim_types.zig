@@ -37,3 +37,32 @@ pub const SimSignalDesc = extern struct {
     type: SimType,
     units: ?[*:0]const u8,
 };
+
+pub const SimCanFrame = extern struct {
+    arb_id: u32,
+    len: u8,
+    flags: u8,
+    _pad: [2]u8,
+    data: [64]u8,
+};
+
+pub const SimCanBusDesc = extern struct {
+    id: u32,
+    name: [*:0]const u8,
+    bitrate: u32,
+    bitrate_data: u32,
+    flags: u8,
+    _pad: [3]u8,
+};
+
+pub const SimSharedDesc = extern struct {
+    id: u32,
+    name: [*:0]const u8,
+    slot_count: u32,
+};
+
+pub const SimSharedSlot = extern struct {
+    slot_id: u32,
+    type: SimType,
+    value: SimValue,
+};

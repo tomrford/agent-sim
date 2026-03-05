@@ -83,6 +83,28 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
+        Some(ResponseData::SignalSample {
+            tick,
+            time_us,
+            values,
+        }) => {
+            println!("Tick: {tick}");
+            println!("Time(us): {time_us}");
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["ID", "Name", "Type", "Value", "Units"]);
+            for signal in values {
+                table.add_row(vec![
+                    signal.id.to_string(),
+                    signal.name.clone(),
+                    signal.signal_type.to_string(),
+                    format!("{:?}", signal.value),
+                    signal.units.clone().unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::SetResult { writes_applied }) => {
             println!("Writes applied: {writes_applied}");
         }
@@ -111,6 +133,69 @@ pub fn print_response(response: &Response, json_mode: bool) {
             );
         }
         Some(ResponseData::Speed { speed }) => println!("{speed}"),
+        Some(ResponseData::CanBuses { buses }) => {
+            let mut table = Table::new();
+            table.load_preset(UTF8_HORIZONTAL_ONLY).set_header(vec![
+                "ID",
+                "Bus",
+                "Bitrate",
+                "Data Bitrate",
+                "FD",
+                "Attached",
+            ]);
+            for bus in buses {
+                table.add_row(vec![
+                    bus.id.to_string(),
+                    bus.name.clone(),
+                    bus.bitrate.to_string(),
+                    if bus.bitrate_data == 0 {
+                        "-".to_string()
+                    } else {
+                        bus.bitrate_data.to_string()
+                    },
+                    bus.fd_capable.to_string(),
+                    bus.attached_iface
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
+        }
+        Some(ResponseData::CanSend { bus, arb_id, len }) => {
+            println!("Sent frame on {bus}: id=0x{arb_id:X} len={len}");
+        }
+        Some(ResponseData::DbcLoaded { bus, signal_count }) => {
+            println!("Loaded DBC for {bus}: {signal_count} signals");
+        }
+        Some(ResponseData::SharedChannels { channels }) => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["ID", "Channel", "Slots"]);
+            for channel in channels {
+                table.add_row(vec![
+                    channel.id.to_string(),
+                    channel.name.clone(),
+                    channel.slot_count.to_string(),
+                ]);
+            }
+            println!("{table}");
+        }
+        Some(ResponseData::SharedValues { channel, slots }) => {
+            println!("Channel: {channel}");
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["Slot", "Type", "Value"]);
+            for slot in slots {
+                table.add_row(vec![
+                    slot.slot_id.to_string(),
+                    slot.signal_type.to_string(),
+                    format!("{:?}", slot.value),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::WatchSamples { samples }) => {
             for sample in samples {
                 println!(
@@ -123,33 +208,37 @@ pub fn print_response(response: &Response, json_mode: bool) {
             recipe,
             dry_run,
             steps_executed,
-            events,
+            steps,
         }) => {
             println!("Recipe: {recipe}");
             println!("Dry run: {dry_run}");
             println!("Steps: {steps_executed}");
-            for event in events {
-                println!("- {event}");
+            for step in steps {
+                let session = step.session.as_deref().unwrap_or("-");
+                println!("- [{:?}] {} {}", step.kind, session, step.detail);
             }
         }
         Some(ResponseData::SessionStatus {
             session,
             socket_path,
             running,
+            env,
         }) => {
             println!("Session: {session}");
             println!("Socket: {socket_path}");
             println!("Running: {running}");
+            println!("Env: {}", env.clone().unwrap_or_else(|| "-".to_string()));
         }
         Some(ResponseData::SessionList { sessions }) => {
             let mut table = Table::new();
             table
                 .load_preset(UTF8_HORIZONTAL_ONLY)
-                .set_header(vec!["Session", "Running", "Socket"]);
+                .set_header(vec!["Session", "Running", "Env", "Socket"]);
             for item in sessions {
                 table.add_row(vec![
                     item.name.clone(),
                     item.running.to_string(),
+                    item.env.clone().unwrap_or_else(|| "-".to_string()),
                     item.socket_path.clone(),
                 ]);
             }

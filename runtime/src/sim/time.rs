@@ -1,7 +1,10 @@
 use crate::protocol::TimeStateData;
-use crate::sim::error::{SimError, TimeError};
-use crate::sim::project::Project;
+use crate::sim::error::TimeError;
 use std::time::Instant;
+use tokio::time::Duration;
+
+const MIN_POLL_DELAY_US: f64 = 100.0;
+const MAX_POLL_DELAY_US: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone)]
 pub struct TimeStatus {
@@ -85,17 +88,24 @@ impl TimeEngine {
         self.speed
     }
 
-    pub fn step(&mut self, project: &Project, duration_us: u64) -> Result<StepResult, TimeError> {
+    pub fn is_running(&self) -> bool {
+        self.state == TimeStateData::Running
+    }
+
+    pub fn step_ticks(
+        &mut self,
+        tick_duration_us: u32,
+        duration_us: u64,
+    ) -> Result<StepResult, TimeError> {
         if self.state == TimeStateData::Running {
             return Err(TimeError::StepWhileRunning);
         }
-        let tick_us = project.tick_duration_us() as u64;
+        let tick_us = tick_duration_us as u64;
         let ticks = if tick_us == 0 {
             0
         } else {
             duration_us / tick_us
         };
-        self.tick_for(project, ticks).map_err(TimeError::from)?;
         let advanced_us = ticks.saturating_mul(tick_us);
         Ok(StepResult {
             requested_us: duration_us,
@@ -104,37 +114,88 @@ impl TimeEngine {
         })
     }
 
-    pub fn tick_realtime(&mut self, project: &Project) -> Result<u64, SimError> {
+    pub fn tick_realtime_due(&mut self, tick_duration_us: u32) -> u64 {
         if self.state != TimeStateData::Running {
-            return Ok(0);
+            return 0;
         }
         let now = Instant::now();
         let Some(last) = self.last_wallclock else {
             self.last_wallclock = Some(now);
-            return Ok(0);
+            return 0;
         };
         let delta = now.duration_since(last).as_secs_f64() * 1_000_000.0 * self.speed;
         self.last_wallclock = Some(now);
         self.remainder_us += delta;
 
-        let tick_us = project.tick_duration_us() as f64;
+        let tick_us = tick_duration_us as f64;
         if tick_us <= 0.0 {
-            return Ok(0);
+            return 0;
         }
         let ticks = (self.remainder_us / tick_us).floor() as u64;
         if ticks == 0 {
-            return Ok(0);
+            return 0;
         }
         self.remainder_us -= ticks as f64 * tick_us;
-        self.tick_for(project, ticks)?;
-        Ok(ticks)
+        ticks
     }
 
-    fn tick_for(&mut self, project: &Project, ticks: u64) -> Result<(), SimError> {
-        for _ in 0..ticks {
-            project.tick()?;
-            self.elapsed_ticks = self.elapsed_ticks.saturating_add(1);
+    pub fn realtime_poll_delay(&self, tick_duration_us: u32) -> Duration {
+        if self.state != TimeStateData::Running {
+            return Duration::from_millis(5);
         }
-        Ok(())
+        if tick_duration_us == 0 {
+            return Duration::from_millis(1);
+        }
+        let tick_us = tick_duration_us as f64;
+        let remaining_sim_us = (tick_us - self.remainder_us).max(0.0);
+        let wall_us = if self.speed > 0.0 {
+            (remaining_sim_us / self.speed).ceil()
+        } else {
+            tick_us.ceil()
+        };
+        let clamped_wall_us = wall_us.clamp(MIN_POLL_DELAY_US, MAX_POLL_DELAY_US);
+        Duration::from_micros(clamped_wall_us as u64)
+    }
+
+    pub fn advance_ticks(&mut self, ticks: u64) {
+        self.elapsed_ticks = self.elapsed_ticks.saturating_add(ticks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimeEngine;
+    use crate::protocol::TimeStateData;
+    use tokio::time::Duration;
+
+    #[test]
+    fn realtime_poll_delay_scales_with_tick_duration() {
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 1.0,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
+        let delay = engine.realtime_poll_delay(20_000);
+        assert!(
+            delay >= Duration::from_millis(20),
+            "expected >=20ms delay, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn realtime_poll_delay_is_capped_to_one_second() {
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 0.001,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
+        let delay = engine.realtime_poll_delay(1_000_000);
+        assert_eq!(
+            delay,
+            Duration::from_secs(1),
+            "poll delay should be capped for extreme slow speeds"
+        );
     }
 }
