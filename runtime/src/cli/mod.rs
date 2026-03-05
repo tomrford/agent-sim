@@ -135,7 +135,7 @@ async fn run_recipe_command(args: &CliArgs, run: &RunArgs) -> Result<ExitCode, C
         ResponseData::RecipeResult {
             recipe: run.recipe_name.clone(),
             dry_run: run.dry_run,
-            steps_executed: recipe_def.steps.len(),
+            steps_executed: ops.len(),
             events,
         },
     );
@@ -528,15 +528,26 @@ fn compile_for_step(
     if spec.by == 0.0 {
         return Err("for.by cannot be zero".to_string());
     }
-    let mut current = spec.from;
-    let within_bounds = |v: f64| {
-        if spec.by > 0.0 {
-            v <= spec.to
-        } else {
-            v >= spec.to
-        }
-    };
-    while within_bounds(current) {
+    let delta = spec.to - spec.from;
+    if (spec.by > 0.0 && delta < 0.0) || (spec.by < 0.0 && delta > 0.0) {
+        return Ok(());
+    }
+    let raw_steps = delta / spec.by;
+    if !raw_steps.is_finite() {
+        return Err("for range is not finite".to_string());
+    }
+    let epsilon = 1e-9_f64;
+    let max_steps_float = (raw_steps + epsilon).floor();
+    if max_steps_float < 0.0 {
+        return Ok(());
+    }
+    if max_steps_float > u64::MAX as f64 {
+        return Err("for range expands to too many iterations".to_string());
+    }
+    let max_steps = max_steps_float as u64;
+
+    for idx in 0..=max_steps {
+        let current = spec.from + spec.by * idx as f64;
         events.push(format!("for {}={current}", spec.signal));
         let mut writes = BTreeMap::new();
         writes.insert(spec.signal.clone(), current.to_string());
@@ -545,7 +556,6 @@ fn compile_for_step(
             writes,
         });
         compile_recipe_steps(&spec.each, ops, events, inherited_session)?;
-        current += spec.by;
     }
     Ok(())
 }
@@ -812,7 +822,8 @@ fn response_error(response: &Response) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_config_relative_path;
+    use super::{RecipeOp, compile_for_step, resolve_config_relative_path};
+    use crate::config::recipe::ForSpec;
     use std::path::Path;
 
     #[test]
@@ -832,5 +843,37 @@ mod tests {
         let resolved =
             resolve_config_relative_path(&absolute, Some(Path::new("/tmp/should-not-apply")));
         assert_eq!(resolved, absolute);
+    }
+
+    #[test]
+    fn compile_for_step_uses_stable_iteration_count_for_fractional_steps() {
+        let spec = ForSpec {
+            signal: "demo.input".to_string(),
+            from: 0.0,
+            to: 1.0,
+            by: 0.1,
+            each: Vec::new(),
+        };
+        let mut ops = Vec::new();
+        let mut events = Vec::new();
+        compile_for_step(&spec, &mut ops, &mut events, None)
+            .expect("for-step compile should succeed");
+        assert_eq!(ops.len(), 11);
+        for (idx, op) in ops.iter().enumerate() {
+            let RecipeOp::Set { writes, .. } = op else {
+                panic!("for-step should compile into set ops only for empty 'each'");
+            };
+            let raw = writes
+                .get("demo.input")
+                .expect("compiled write should include loop signal");
+            let value = raw
+                .parse::<f64>()
+                .expect("compiled write value should parse as f64");
+            let expected = idx as f64 * 0.1;
+            assert!(
+                (value - expected).abs() <= 1e-9,
+                "expected value {expected}, got {value}"
+            );
+        }
     }
 }

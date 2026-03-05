@@ -1,6 +1,7 @@
 use crate::protocol::TimeStateData;
 use crate::sim::error::TimeError;
 use std::time::Instant;
+use tokio::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct TimeStatus {
@@ -135,7 +136,45 @@ impl TimeEngine {
         ticks
     }
 
+    pub fn realtime_poll_delay(&self, tick_duration_us: u32) -> Duration {
+        if self.state != TimeStateData::Running {
+            return Duration::from_millis(5);
+        }
+        if tick_duration_us == 0 {
+            return Duration::from_millis(1);
+        }
+        let tick_us = tick_duration_us as f64;
+        let remaining_sim_us = (tick_us - self.remainder_us).max(0.0);
+        let wall_us = if self.speed > 0.0 {
+            (remaining_sim_us / self.speed).ceil()
+        } else {
+            tick_us.ceil()
+        };
+        let clamped_wall_us = wall_us.clamp(100.0, u64::MAX as f64);
+        Duration::from_micros(clamped_wall_us as u64)
+    }
+
     pub fn advance_ticks(&mut self, ticks: u64) {
         self.elapsed_ticks = self.elapsed_ticks.saturating_add(ticks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimeEngine;
+    use crate::protocol::TimeStateData;
+    use tokio::time::Duration;
+
+    #[test]
+    fn realtime_poll_delay_scales_with_tick_duration() {
+        let mut engine = TimeEngine::default();
+        engine.state = TimeStateData::Running;
+        engine.speed = 1.0;
+        engine.remainder_us = 0.0;
+        let delay = engine.realtime_poll_delay(20_000);
+        assert!(
+            delay >= Duration::from_millis(20),
+            "expected >=20ms delay, got {delay:?}"
+        );
     }
 }
