@@ -2,14 +2,15 @@ use crate::can::CanSocket;
 use crate::can::dbc::{DbcBusOverlay, decode_signal, encode_signal, frame_key_from_frame};
 use crate::protocol::{
     Action, CanBusData, Request, Response, ResponseData, SessionInfoData, SharedChannelData,
-    SignalData, SignalValueData, parse_duration_us,
+    SharedSlotValueData, SignalData, SignalValueData, parse_duration_us,
 };
+use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
 use crate::sim::project::Project;
 use crate::sim::time::TimeEngine;
 use crate::sim::types::{
     CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RESERVED_MASK,
-    CAN_FLAG_RTR, SignalType, SignalValue, SimCanBusDesc, SimCanFrame,
+    CAN_FLAG_RTR, SignalType, SignalValue, SimCanBusDesc, SimCanFrame, SimSharedDesc,
 };
 use globset::{Glob, GlobMatcher};
 use std::collections::{BTreeSet, HashMap};
@@ -25,6 +26,7 @@ pub struct DaemonState {
     env: Option<String>,
     project: Project,
     can_attached: HashMap<String, AttachedCanBus>,
+    shared_attached: HashMap<String, AttachedSharedChannel>,
     dbc_overlays: HashMap<String, DbcBusOverlay>,
     frame_state: HashMap<String, HashMap<u32, SimCanFrame>>,
     time: TimeEngine,
@@ -34,6 +36,12 @@ pub struct DaemonState {
 struct AttachedCanBus {
     meta: SimCanBusDesc,
     socket: CanSocket,
+}
+
+struct AttachedSharedChannel {
+    meta: SimSharedDesc,
+    region: SharedRegion,
+    writer: bool,
 }
 
 struct ActionMessage {
@@ -54,6 +62,7 @@ impl DaemonState {
             env,
             project,
             can_attached: HashMap::new(),
+            shared_attached: HashMap::new(),
             dbc_overlays: HashMap::new(),
             frame_state: HashMap::new(),
             time: TimeEngine::default(),
@@ -520,6 +529,54 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 .collect::<Vec<_>>();
             Ok(ResponseData::SharedChannels { channels })
         }
+        Action::SharedAttach {
+            channel_name,
+            path,
+            writer,
+            writer_session,
+        } => {
+            if state.shared_attached.contains_key(&channel_name) {
+                return Err(format!(
+                    "shared channel '{channel_name}' is already attached"
+                ));
+            }
+            let meta = find_shared_channel_meta(state, &channel_name)?;
+            let region = SharedRegion::open(
+                std::path::Path::new(&path),
+                meta.slot_count as usize,
+                &writer_session,
+                writer,
+            )?;
+            state.shared_attached.insert(
+                channel_name.clone(),
+                AttachedSharedChannel {
+                    meta,
+                    region,
+                    writer,
+                },
+            );
+            Ok(ResponseData::Ack)
+        }
+        Action::SharedGet { channel_name } => {
+            let attachment = state
+                .shared_attached
+                .get(&channel_name)
+                .ok_or_else(|| format!("shared channel '{channel_name}' is not attached"))?;
+            let slots = attachment
+                .region
+                .read_snapshot()
+                .into_iter()
+                .map(|slot| SharedSlotValueData {
+                    slot_id: slot.slot_id,
+                    signal_type: slot.value.signal_type(),
+                    value: slot.value,
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::SharedValues {
+                channel: channel_name,
+                slots,
+            })
+        }
         Action::CanSend {
             bus_name,
             arb_id,
@@ -582,11 +639,19 @@ fn advance_project_ticks(state: &mut DaemonState, ticks: u64) -> Result<(), Stri
             state.time.advance_ticks(processed);
             return Err(err);
         }
+        if let Err(err) = process_shared_rx(state) {
+            state.time.advance_ticks(processed);
+            return Err(err);
+        }
         if let Err(err) = state.project.tick() {
             state.time.advance_ticks(processed);
             return Err(err.to_string());
         }
         if let Err(err) = process_can_tx(state) {
+            state.time.advance_ticks(processed.saturating_add(1));
+            return Err(err);
+        }
+        if let Err(err) = process_shared_tx(state) {
             state.time.advance_ticks(processed.saturating_add(1));
             return Err(err);
         }
@@ -637,6 +702,40 @@ fn process_can_tx(state: &mut DaemonState) -> Result<(), String> {
     Ok(())
 }
 
+fn process_shared_rx(state: &mut DaemonState) -> Result<(), String> {
+    for (channel_name, attachment) in &state.shared_attached {
+        let slots = attachment.region.read_snapshot();
+        if slots.is_empty() {
+            continue;
+        }
+        state
+            .project
+            .shared_read(attachment.meta.id, &slots)
+            .map_err(|e| format!("sim_shared_read failed for channel '{channel_name}': {e}"))?;
+    }
+    Ok(())
+}
+
+fn process_shared_tx(state: &mut DaemonState) -> Result<(), String> {
+    for (channel_name, attachment) in &mut state.shared_attached {
+        if !attachment.writer {
+            continue;
+        }
+        let slots = state
+            .project
+            .shared_write(attachment.meta.id)
+            .map_err(|e| format!("sim_shared_write failed for channel '{channel_name}': {e}"))?;
+        if slots.is_empty() {
+            continue;
+        }
+        attachment
+            .region
+            .publish(&slots)
+            .map_err(|e| format!("failed publishing shared channel '{channel_name}': {e}"))?;
+    }
+    Ok(())
+}
+
 fn find_can_bus_meta(state: &DaemonState, bus_name: &str) -> Result<SimCanBusDesc, String> {
     state
         .project
@@ -645,6 +744,19 @@ fn find_can_bus_meta(state: &DaemonState, bus_name: &str) -> Result<SimCanBusDes
         .find(|bus| bus.name == bus_name)
         .cloned()
         .ok_or_else(|| format!("CAN bus '{bus_name}' not declared by loaded project"))
+}
+
+fn find_shared_channel_meta(
+    state: &DaemonState,
+    channel_name: &str,
+) -> Result<SimSharedDesc, String> {
+    state
+        .project
+        .shared_channels()
+        .iter()
+        .find(|channel| channel.name == channel_name)
+        .cloned()
+        .ok_or_else(|| format!("shared channel '{channel_name}' not declared by loaded project"))
 }
 
 fn get_can_signal_values(

@@ -1,7 +1,8 @@
 use crate::sim::error::{ProjectError, SimError};
 use crate::sim::types::{
     SignalMeta, SignalType, SignalValue, SimCanBusDesc, SimCanBusDescRaw, SimCanFrame,
-    SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSignalDescRaw, SimValueRaw,
+    SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSharedSlot, SimSharedSlotRaw,
+    SimSignalDescRaw, SimValueRaw,
 };
 use libloading::Library;
 use std::collections::HashMap;
@@ -36,6 +37,11 @@ struct ProjectCanApi {
     sim_can_tx: SimCanTxFn,
 }
 
+struct ProjectSharedApi {
+    sim_shared_read: SimSharedReadFn,
+    sim_shared_write: SimSharedWriteFn,
+}
+
 pub struct Project {
     pub libpath: PathBuf,
     tick_duration_us: u32,
@@ -52,6 +58,7 @@ pub struct Project {
     _sim_get_signals: SimGetSignalsFn,
     _sim_get_tick_duration_us: SimGetTickDurationUsFn,
     can_api: Option<ProjectCanApi>,
+    shared_api: Option<ProjectSharedApi>,
     _library: Library,
 }
 
@@ -202,14 +209,24 @@ impl Project {
             }
         };
 
-        let shared_channels = match (sim_shared_get_channels, sim_shared_read, sim_shared_write) {
-            (None, None, None) => Vec::new(),
-            (Some(get_channels), Some(_), Some(_)) => Self::load_shared_channels(get_channels)?,
+        let (shared_api, shared_channels) = match (
+            sim_shared_get_channels,
+            sim_shared_read,
+            sim_shared_write,
+        ) {
+            (None, None, None) => (None, Vec::new()),
+            (Some(get_channels), Some(shared_read), Some(shared_write)) => (
+                Some(ProjectSharedApi {
+                    sim_shared_read: shared_read,
+                    sim_shared_write: shared_write,
+                }),
+                Self::load_shared_channels(get_channels)?,
+            ),
             _ => {
-                return Err(ProjectError::InvalidCanExports(
-                        "if any shared-state symbol is exported, sim_shared_get_channels/sim_shared_read/sim_shared_write must all be exported"
-                            .to_string(),
-                    ));
+                return Err(ProjectError::InvalidSharedExports(
+                            "if any shared-state symbol is exported, sim_shared_get_channels/sim_shared_read/sim_shared_write must all be exported"
+                                .to_string(),
+                        ));
             }
         };
 
@@ -217,6 +234,11 @@ impl Project {
             .iter()
             .map(|s| (s.name.clone(), s.id))
             .collect::<HashMap<_, _>>();
+        if signals.iter().any(|signal| signal.name.starts_with("can.")) {
+            return Err(ProjectError::LibraryLoad(
+                "signal names starting with 'can.' are reserved for DBC overlays".to_string(),
+            ));
+        }
         let signal_id_to_index = signals
             .iter()
             .enumerate()
@@ -239,6 +261,7 @@ impl Project {
             _sim_get_signals: sim_get_signals,
             _sim_get_tick_duration_us: sim_get_tick_duration_us,
             can_api,
+            shared_api,
             _library: library,
         })
     }
@@ -331,6 +354,56 @@ impl Project {
         Ok(out)
     }
 
+    pub(crate) fn shared_read(
+        &self,
+        channel_id: u32,
+        slots: &[SimSharedSlot],
+    ) -> Result<(), SimError> {
+        let Some(shared_api) = &self.shared_api else {
+            return Ok(());
+        };
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let raw_slots = slots.iter().map(SimSharedSlot::to_raw).collect::<Vec<_>>();
+        let status = unsafe {
+            (shared_api.sim_shared_read)(channel_id, raw_slots.as_ptr(), raw_slots.len() as u32)
+        };
+        self.map_status(status, None, None)
+    }
+
+    pub(crate) fn shared_write(&self, channel_id: u32) -> Result<Vec<SimSharedSlot>, SimError> {
+        let Some(shared_api) = &self.shared_api else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut capacity = 32_u32;
+        loop {
+            let mut raw_slots = vec![SimSharedSlotRaw::default(); capacity as usize];
+            let mut written = 0_u32;
+            let status = unsafe {
+                (shared_api.sim_shared_write)(
+                    channel_id,
+                    raw_slots.as_mut_ptr(),
+                    capacity,
+                    &mut written as *mut u32,
+                )
+            };
+            if status != STATUS_OK && status != STATUS_BUFFER_TOO_SMALL {
+                self.map_status(status, None, None)?;
+                break;
+            }
+            raw_slots.truncate(written as usize);
+            out.extend(raw_slots.into_iter().filter_map(SimSharedSlot::from_raw));
+            if status == STATUS_BUFFER_TOO_SMALL {
+                capacity = capacity.saturating_mul(2).max(2);
+                continue;
+            }
+            break;
+        }
+        Ok(out)
+    }
+
     pub(crate) fn read(&self, signal: &SignalMeta) -> Result<SignalValue, SimError> {
         let mut raw = SimValueRaw {
             signal_type: 0,
@@ -410,7 +483,7 @@ impl Project {
                 .into_iter()
                 .map(|entry| {
                     if entry.name.is_null() {
-                        return Err(ProjectError::InvalidCanMetadata);
+                        return Err(ProjectError::InvalidSharedMetadata);
                     }
                     let name = unsafe { CStr::from_ptr(entry.name) }
                         .to_string_lossy()

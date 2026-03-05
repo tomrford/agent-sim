@@ -121,6 +121,7 @@ pub struct SharedArgs {
 #[derive(Debug, Subcommand)]
 pub enum SharedCommand {
     List,
+    Get { channel: String },
 }
 
 #[derive(Debug, Subcommand)]

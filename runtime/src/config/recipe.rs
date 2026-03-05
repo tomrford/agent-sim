@@ -50,8 +50,19 @@ pub struct ForSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StepSpec {
+    Duration(String),
+    Detailed {
+        duration: String,
+        session: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AssertSpec {
     pub signal: String,
+    pub session: Option<String>,
     pub eq: Option<toml::Value>,
     pub gt: Option<f64>,
     pub lt: Option<f64>,
@@ -67,6 +78,8 @@ pub struct EnvDef {
     pub sessions: Vec<EnvSession>,
     #[serde(default)]
     pub can: BTreeMap<String, EnvCanBus>,
+    #[serde(default)]
+    pub shared: BTreeMap<String, EnvSharedChannel>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,16 +97,45 @@ pub struct EnvCanBus {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct EnvSharedChannel {
+    #[serde(default)]
+    pub members: Vec<String>,
+    pub writer: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum RecipeStep {
-    Set { set: BTreeMap<String, toml::Value> },
-    Step { step: String },
-    Print { print: PrintSpec },
-    Speed { speed: f64 },
-    Reset { reset: bool },
-    Sleep { sleep: u64 },
-    For { r#for: ForSpec },
-    Assert { assert: AssertSpec },
+    Set {
+        set: BTreeMap<String, toml::Value>,
+        session: Option<String>,
+    },
+    Step {
+        step: StepSpec,
+        session: Option<String>,
+    },
+    Print {
+        print: PrintSpec,
+        session: Option<String>,
+    },
+    Speed {
+        speed: f64,
+        session: Option<String>,
+    },
+    Reset {
+        reset: bool,
+        session: Option<String>,
+    },
+    Sleep {
+        sleep: u64,
+    },
+    For {
+        r#for: ForSpec,
+        session: Option<String>,
+    },
+    Assert {
+        assert: AssertSpec,
+    },
 }
 
 pub fn parse_config(content: &str) -> Result<FileConfig, ConfigError> {

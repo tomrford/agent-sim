@@ -288,9 +288,46 @@ pub struct SimSharedSlotRaw {
     pub value: SimValueRaw,
 }
 
+impl Default for SimSharedSlotRaw {
+    fn default() -> Self {
+        let value = SignalValue::F64(0.0).to_raw();
+        Self {
+            slot_id: 0,
+            signal_type: SimTypeRaw::F64 as u32,
+            value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimSharedDesc {
     pub id: u32,
     pub name: String,
     pub slot_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimSharedSlot {
+    pub slot_id: u32,
+    pub value: SignalValue,
+}
+
+impl SimSharedSlot {
+    pub fn to_raw(&self) -> SimSharedSlotRaw {
+        let raw = self.value.to_raw();
+        SimSharedSlotRaw {
+            slot_id: self.slot_id,
+            signal_type: raw.signal_type,
+            value: raw,
+        }
+    }
+
+    pub fn from_raw(raw: SimSharedSlotRaw) -> Option<Self> {
+        let mut value = raw.value;
+        value.signal_type = raw.signal_type;
+        Some(Self {
+            slot_id: raw.slot_id,
+            value: unsafe { SignalValue::from_raw(value) }?,
+        })
+    }
 }

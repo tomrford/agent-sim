@@ -11,8 +11,12 @@ pub enum ProjectError {
     InvalidSignalMetadata,
     #[error("invalid CAN exports: {0}")]
     InvalidCanExports(String),
+    #[error("invalid shared-state exports: {0}")]
+    InvalidSharedExports(String),
     #[error("invalid CAN metadata from project")]
     InvalidCanMetadata,
+    #[error("invalid shared-state metadata from project")]
+    InvalidSharedMetadata,
 }
 
 #[derive(Debug, Error)]

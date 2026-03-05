@@ -17,6 +17,9 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Signals => Action::Signals,
         Command::Shared(shared) => match &shared.command {
             SharedCommand::List => Action::SharedList,
+            SharedCommand::Get { channel } => Action::SharedGet {
+                channel_name: parse_shared_channel_selector(channel)?,
+            },
         },
         Command::Can(can) => match &can.command {
             CanCommand::Buses => Action::CanBuses,
@@ -93,6 +96,24 @@ fn parse_arb_id(value: &str) -> Result<u32, CliError> {
     }
 }
 
+fn parse_shared_channel_selector(value: &str) -> Result<String, CliError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::CommandFailed(
+            "shared get requires a channel selector".to_string(),
+        ));
+    }
+    if let Some(name) = trimmed.strip_suffix(".*") {
+        if name.is_empty() {
+            return Err(CliError::CommandFailed(format!(
+                "invalid shared selector '{value}'"
+            )));
+        }
+        return Ok(name.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
 fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliError> {
     if args.entries.len() == 2 && !args.entries[0].contains('=') && !args.entries[1].contains('=') {
         let mut map = BTreeMap::new();
@@ -157,5 +178,18 @@ mod tests {
             2048
         );
         assert!(parse_arb_id("xyz").is_err());
+    }
+
+    #[test]
+    fn shared_selector_parser_accepts_wildcard_suffix() {
+        assert_eq!(
+            parse_shared_channel_selector("sensor_feed.*").expect("shared selector should parse"),
+            "sensor_feed"
+        );
+        assert_eq!(
+            parse_shared_channel_selector("sensor_feed").expect("plain selector should parse"),
+            "sensor_feed"
+        );
+        assert!(parse_shared_channel_selector(".*").is_err());
     }
 }

@@ -59,6 +59,15 @@ pub enum Action {
         path: String,
     },
     SharedList,
+    SharedAttach {
+        channel_name: String,
+        path: String,
+        writer: bool,
+        writer_session: String,
+    },
+    SharedGet {
+        channel_name: String,
+    },
     CanSend {
         bus_name: String,
         arb_id: u32,
@@ -151,6 +160,10 @@ pub enum ResponseData {
     SharedChannels {
         channels: Vec<SharedChannelData>,
     },
+    SharedValues {
+        channel: String,
+        slots: Vec<SharedSlotValueData>,
+    },
     WatchSamples {
         samples: Vec<WatchSampleData>,
     },
@@ -226,6 +239,13 @@ pub struct SharedChannelData {
     pub id: u32,
     pub name: String,
     pub slot_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedSlotValueData {
+    pub slot_id: u32,
+    pub signal_type: SignalType,
+    pub value: SignalValue,
 }
 
 pub fn parse_duration_us(input: &str) -> Result<u64, ProtocolError> {

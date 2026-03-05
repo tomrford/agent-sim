@@ -8,7 +8,8 @@ use crate::cli::commands::to_request;
 use crate::cli::error::CliError;
 use crate::config::load_config;
 use crate::config::recipe::{
-    AssertSpec, EnvCanBus, EnvDef, ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string,
+    AssertSpec, EnvCanBus, EnvDef, EnvSharedChannel, ForSpec, PrintSpec, RecipeStep, StepSpec,
+    toml_value_to_cli_string,
 };
 use crate::connection::send_request;
 use crate::daemon::lifecycle;
@@ -58,13 +59,30 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
 }
 
 enum RecipeOp {
-    Set(BTreeMap<String, String>),
-    Step(String),
-    Print(Vec<String>),
-    Speed(f64),
-    Reset,
+    Set {
+        session: Option<String>,
+        writes: BTreeMap<String, String>,
+    },
+    Step {
+        session: Option<String>,
+        duration: String,
+    },
+    Print {
+        session: Option<String>,
+        selectors: Vec<String>,
+    },
+    Speed {
+        session: Option<String>,
+        speed: f64,
+    },
+    Reset {
+        session: Option<String>,
+    },
     SleepMs(u64),
-    Assert(AssertSpec),
+    Assert {
+        session: Option<String>,
+        assert: AssertSpec,
+    },
 }
 
 async fn run_watch_command(args: &CliArgs, watch: &WatchArgs) -> Result<ExitCode, CliError> {
@@ -100,16 +118,16 @@ async fn run_recipe_command(args: &CliArgs, run: &RunArgs) -> Result<ExitCode, C
 
     let mut events = Vec::new();
     let mut ops = Vec::new();
-    compile_recipe_steps(&recipe_def.steps, &mut ops, &mut events)
+    compile_recipe_steps(&recipe_def.steps, &mut ops, &mut events, None)
         .map_err(CliError::CommandFailed)?;
 
-    let target_session = recipe_def
+    let default_session = recipe_def
         .session
         .as_deref()
         .unwrap_or(args.session.as_str())
         .to_string();
     if !run.dry_run {
-        execute_recipe_ops(&target_session, &ops).await?;
+        execute_recipe_ops(&default_session, &ops).await?;
     }
 
     let response = Response::ok(
@@ -285,6 +303,9 @@ async fn start_env_internal(
     for (bus_name, bus) in &env_def.can {
         apply_env_bus_wiring(bus_name, bus).await?;
     }
+    for (channel_name, channel) in &env_def.shared {
+        apply_env_shared_wiring(env_name, channel_name, channel).await?;
+    }
     Ok(())
 }
 
@@ -309,6 +330,48 @@ async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), Cli
             )
             .await?;
         }
+    }
+    Ok(())
+}
+
+async fn apply_env_shared_wiring(
+    env_name: &str,
+    channel_name: &str,
+    channel: &EnvSharedChannel,
+) -> Result<(), CliError> {
+    let shared_root = lifecycle::session_root().join("shared");
+    std::fs::create_dir_all(&shared_root).map_err(|e| {
+        CliError::CommandFailed(format!(
+            "failed to create shared region root '{}': {e}",
+            shared_root.display()
+        ))
+    })?;
+    let region_path = shared_root.join(format!("{env_name}__{channel_name}.bin"));
+    let region_path_str = region_path.display().to_string();
+
+    if !channel.members.iter().any(|member| {
+        parse_env_member(member, channel_name)
+            .map(|(session, _)| session == channel.writer)
+            .unwrap_or(false)
+    }) {
+        return Err(CliError::CommandFailed(format!(
+            "shared channel '{channel_name}' writer '{}' is not listed in members",
+            channel.writer
+        )));
+    }
+
+    for member in &channel.members {
+        let (session_name, member_channel_name) = parse_env_member(member, channel_name)?;
+        send_action_success(
+            &session_name,
+            Action::SharedAttach {
+                channel_name: member_channel_name,
+                path: region_path_str.clone(),
+                writer: session_name == channel.writer,
+                writer_session: channel.writer.clone(),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -344,10 +407,11 @@ fn compile_recipe_steps(
     steps: &[RecipeStep],
     ops: &mut Vec<RecipeOp>,
     events: &mut Vec<String>,
+    inherited_session: Option<&str>,
 ) -> Result<(), String> {
     for step in steps {
         match step {
-            RecipeStep::Set { set } => {
+            RecipeStep::Set { set, session } => {
                 let mut writes = BTreeMap::new();
                 for (key, value) in set {
                     writes.insert(
@@ -356,37 +420,71 @@ fn compile_recipe_steps(
                     );
                 }
                 events.push(format!("set {}", writes.len()));
-                ops.push(RecipeOp::Set(writes));
+                let session = session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Set { session, writes });
             }
-            RecipeStep::Step { step } => {
-                events.push(format!("step {step}"));
-                ops.push(RecipeOp::Step(step.clone()));
+            RecipeStep::Step { step, session } => {
+                let (duration, nested_session) = match step {
+                    StepSpec::Duration(duration) => (duration.clone(), None),
+                    StepSpec::Detailed { duration, session } => (duration.clone(), session.clone()),
+                };
+                events.push(format!("step {duration}"));
+                let session = nested_session
+                    .or_else(|| session.clone())
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Step { session, duration });
             }
-            RecipeStep::Print { print } => {
+            RecipeStep::Print { print, session } => {
                 let selectors = match print {
                     PrintSpec::All(value) if value == "*" => vec!["*".to_string()],
                     PrintSpec::All(value) => vec![value.clone()],
                     PrintSpec::Signals(values) => values.clone(),
                 };
                 events.push(format!("print {}", selectors.join(",")));
-                ops.push(RecipeOp::Print(selectors));
+                let session = session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Print { session, selectors });
             }
-            RecipeStep::Speed { speed } => {
+            RecipeStep::Speed { speed, session } => {
                 events.push(format!("speed {speed}"));
-                ops.push(RecipeOp::Speed(*speed));
+                let session = session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Speed {
+                    session,
+                    speed: *speed,
+                });
             }
-            RecipeStep::Reset { .. } => {
+            RecipeStep::Reset { session, .. } => {
                 events.push("reset".to_string());
-                ops.push(RecipeOp::Reset);
+                let session = session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Reset { session });
             }
             RecipeStep::Sleep { sleep: ms } => {
                 events.push(format!("sleep {ms}ms"));
                 ops.push(RecipeOp::SleepMs(*ms));
             }
-            RecipeStep::For { r#for } => compile_for_step(r#for, ops, events)?,
+            RecipeStep::For { r#for, session } => {
+                let session = session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                compile_for_step(r#for, ops, events, session.as_deref())?;
+            }
             RecipeStep::Assert { assert } => {
                 events.push(format!("assert {}", assert.signal));
-                ops.push(RecipeOp::Assert(assert.clone()));
+                let session = assert
+                    .session
+                    .clone()
+                    .or_else(|| inherited_session.map(ToString::to_string));
+                ops.push(RecipeOp::Assert {
+                    session,
+                    assert: assert.clone(),
+                });
             }
         }
     }
@@ -397,6 +495,7 @@ fn compile_for_step(
     spec: &ForSpec,
     ops: &mut Vec<RecipeOp>,
     events: &mut Vec<String>,
+    inherited_session: Option<&str>,
 ) -> Result<(), String> {
     if spec.by == 0.0 {
         return Err("for.by cannot be zero".to_string());
@@ -413,17 +512,21 @@ fn compile_for_step(
         events.push(format!("for {}={current}", spec.signal));
         let mut writes = BTreeMap::new();
         writes.insert(spec.signal.clone(), current.to_string());
-        ops.push(RecipeOp::Set(writes));
-        compile_recipe_steps(&spec.each, ops, events)?;
+        ops.push(RecipeOp::Set {
+            session: inherited_session.map(ToString::to_string),
+            writes,
+        });
+        compile_recipe_steps(&spec.each, ops, events, inherited_session)?;
         current += spec.by;
     }
     Ok(())
 }
 
-async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliError> {
+async fn execute_recipe_ops(default_session: &str, ops: &[RecipeOp]) -> Result<(), CliError> {
     for op in ops {
         match op {
-            RecipeOp::Set(writes) => {
+            RecipeOp::Set { session, writes } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 send_action_success(
                     session,
                     Action::Set {
@@ -432,7 +535,8 @@ async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliEr
                 )
                 .await?;
             }
-            RecipeOp::Step(duration) => {
+            RecipeOp::Step { session, duration } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 send_action_success(
                     session,
                     Action::TimeStep {
@@ -441,7 +545,8 @@ async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliEr
                 )
                 .await?;
             }
-            RecipeOp::Print(selectors) => {
+            RecipeOp::Print { session, selectors } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 send_action_success(
                     session,
                     Action::Get {
@@ -450,7 +555,8 @@ async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliEr
                 )
                 .await?;
             }
-            RecipeOp::Speed(speed) => {
+            RecipeOp::Speed { session, speed } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 send_action_success(
                     session,
                     Action::TimeSpeed {
@@ -459,13 +565,15 @@ async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliEr
                 )
                 .await?;
             }
-            RecipeOp::Reset => {
+            RecipeOp::Reset { session } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 send_action_success(session, Action::Reset).await?;
             }
             RecipeOp::SleepMs(ms) => {
                 sleep(Duration::from_millis(*ms)).await;
             }
-            RecipeOp::Assert(assert) => {
+            RecipeOp::Assert { session, assert } => {
+                let session = session.as_deref().unwrap_or(default_session);
                 let value = fetch_first_signal_value(session, &assert.signal).await?;
                 let context = format_tick_context(session)
                     .await

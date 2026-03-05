@@ -159,6 +159,21 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
+        Some(ResponseData::SharedValues { channel, slots }) => {
+            println!("Channel: {channel}");
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["Slot", "Type", "Value"]);
+            for slot in slots {
+                table.add_row(vec![
+                    slot.slot_id.to_string(),
+                    slot.signal_type.to_string(),
+                    format!("{:?}", slot.value),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::WatchSamples { samples }) => {
             for sample in samples {
                 println!(
