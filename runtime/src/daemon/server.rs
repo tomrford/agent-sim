@@ -14,7 +14,7 @@ use crate::sim::types::{
 };
 use globset::{Glob, GlobMatcher};
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -506,7 +506,8 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
         }
         Action::CanLoadDbc { bus_name, path } => {
             let _ = find_can_bus_meta(state, &bus_name)?;
-            let overlay = DbcBusOverlay::load(std::path::Path::new(&path))?;
+            ensure_absolute_path(&path, "DBC")?;
+            let overlay = DbcBusOverlay::load(Path::new(&path))?;
             let signal_count = overlay.signal_names().count();
             state.dbc_overlays.insert(bus_name.clone(), overlay);
             Ok(ResponseData::DbcLoaded {
@@ -998,4 +999,37 @@ fn validate_can_frame(bus: &SimCanBusDesc, frame: &SimCanFrame) -> Result<(), St
 
 fn is_valid_can_fd_length(len: u8) -> bool {
     matches!(len, 0..=8 | 12 | 16 | 20 | 24 | 32 | 48 | 64)
+}
+
+fn ensure_absolute_path(path: &str, context: &str) -> Result<(), String> {
+    if Path::new(path).is_absolute() {
+        Ok(())
+    } else {
+        Err(format!("{context} path must be absolute: '{path}'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_absolute_path;
+
+    #[test]
+    fn ensure_absolute_path_accepts_absolute_paths() {
+        let absolute = std::env::temp_dir()
+            .join("agent-sim")
+            .join("file.dbc")
+            .to_string_lossy()
+            .into_owned();
+        assert!(ensure_absolute_path(&absolute, "DBC").is_ok());
+    }
+
+    #[test]
+    fn ensure_absolute_path_rejects_relative_paths() {
+        let err =
+            ensure_absolute_path("dbc/internal.dbc", "DBC").expect_err("relative path must fail");
+        assert!(
+            err.contains("path must be absolute"),
+            "unexpected error: {err}"
+        );
+    }
 }
