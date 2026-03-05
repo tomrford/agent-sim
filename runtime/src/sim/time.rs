@@ -3,6 +3,9 @@ use crate::sim::error::TimeError;
 use std::time::Instant;
 use tokio::time::Duration;
 
+const MIN_POLL_DELAY_US: f64 = 100.0;
+const MAX_POLL_DELAY_US: f64 = 1_000_000.0;
+
 #[derive(Debug, Clone)]
 pub struct TimeStatus {
     pub state: TimeStateData,
@@ -150,7 +153,7 @@ impl TimeEngine {
         } else {
             tick_us.ceil()
         };
-        let clamped_wall_us = wall_us.clamp(100.0, u64::MAX as f64);
+        let clamped_wall_us = wall_us.clamp(MIN_POLL_DELAY_US, MAX_POLL_DELAY_US);
         Duration::from_micros(clamped_wall_us as u64)
     }
 
@@ -175,6 +178,20 @@ mod tests {
         assert!(
             delay >= Duration::from_millis(20),
             "expected >=20ms delay, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn realtime_poll_delay_is_capped_to_one_second() {
+        let mut engine = TimeEngine::default();
+        engine.state = TimeStateData::Running;
+        engine.speed = 0.001;
+        engine.remainder_us = 0.0;
+        let delay = engine.realtime_poll_delay(1_000_000);
+        assert_eq!(
+            delay,
+            Duration::from_secs(1),
+            "poll delay should be capped for extreme slow speeds"
         );
     }
 }

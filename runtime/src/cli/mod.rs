@@ -538,10 +538,8 @@ fn compile_for_step(
     }
     let epsilon = 1e-9_f64;
     let max_steps_float = (raw_steps + epsilon).floor();
-    if max_steps_float < 0.0 {
-        return Ok(());
-    }
-    if max_steps_float > u64::MAX as f64 {
+    debug_assert!(max_steps_float >= 0.0);
+    if max_steps_float >= u64::MAX as f64 {
         return Err("for range expands to too many iterations".to_string());
     }
     let max_steps = max_steps_float as u64;
@@ -875,5 +873,24 @@ mod tests {
                 "expected value {expected}, got {value}"
             );
         }
+    }
+
+    #[test]
+    fn compile_for_step_rejects_u64_max_edge_case() {
+        let spec = ForSpec {
+            signal: "demo.input".to_string(),
+            from: 0.0,
+            to: u64::MAX as f64,
+            by: 1.0,
+            each: Vec::new(),
+        };
+        let mut ops = Vec::new();
+        let mut events = Vec::new();
+        let err = compile_for_step(&spec, &mut ops, &mut events, None)
+            .expect_err("2^64-sized range must be rejected");
+        assert!(
+            err.contains("too many iterations"),
+            "unexpected error: {err}"
+        );
     }
 }
