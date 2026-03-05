@@ -3,12 +3,15 @@ pub mod commands;
 pub mod error;
 pub mod output;
 
-use crate::cli::args::{CliArgs, Command, RunArgs, WatchArgs};
+use crate::cli::args::{CliArgs, CloseArgs, Command, EnvArgs, EnvCommand, RunArgs, WatchArgs};
 use crate::cli::commands::to_request;
 use crate::cli::error::CliError;
 use crate::config::load_config;
-use crate::config::recipe::{AssertSpec, ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
+use crate::config::recipe::{
+    AssertSpec, EnvCanBus, EnvDef, ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string,
+};
 use crate::connection::send_request;
+use crate::daemon::lifecycle;
 use crate::protocol::{Action, Request, Response, ResponseData, SignalValueData, WatchSampleData};
 use crate::sim::types::SignalValue;
 use std::collections::BTreeMap;
@@ -35,6 +38,10 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
     match command {
         Command::Watch(watch) => run_watch_command(&args, watch).await,
         Command::Run(run) => run_recipe_command(&args, run).await,
+        Command::Close(close) if close.all || close.env.is_some() => {
+            run_close_command(&args, close).await
+        }
+        Command::Env(env) => run_env_command(&args, env).await,
         _ => {
             let request = to_request(&args)?;
             let response = send_request(&args.session, &request)
@@ -89,13 +96,20 @@ async fn run_recipe_command(args: &CliArgs, run: &RunArgs) -> Result<ExitCode, C
         .recipe(&run.recipe_name)
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
 
+    validate_recipe_preconditions(recipe_def, &config, args).await?;
+
     let mut events = Vec::new();
     let mut ops = Vec::new();
     compile_recipe_steps(&recipe_def.steps, &mut ops, &mut events)
         .map_err(CliError::CommandFailed)?;
 
+    let target_session = recipe_def
+        .session
+        .as_deref()
+        .unwrap_or(args.session.as_str())
+        .to_string();
     if !run.dry_run {
-        execute_recipe_ops(&args.session, &ops).await?;
+        execute_recipe_ops(&target_session, &ops).await?;
     }
 
     let response = Response::ok(
@@ -109,6 +123,221 @@ async fn run_recipe_command(args: &CliArgs, run: &RunArgs) -> Result<ExitCode, C
     );
     output::print_response(&response, args.json);
     Ok(ExitCode::SUCCESS)
+}
+
+async fn run_close_command(_args: &CliArgs, close: &CloseArgs) -> Result<ExitCode, CliError> {
+    let sessions = lifecycle::list_sessions()
+        .await
+        .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    let mut targets = sessions
+        .into_iter()
+        .filter(|(_, _, running, _)| *running)
+        .filter(|(_, _, _, env)| match &close.env {
+            Some(requested_env) => env.as_ref() == Some(requested_env),
+            None => true,
+        })
+        .map(|(name, _, _, _)| name)
+        .collect::<Vec<_>>();
+    targets.sort();
+
+    for session_name in targets {
+        if send_action_success(&session_name, Action::Close)
+            .await
+            .is_err()
+            && let Some(pid) = lifecycle::read_pid(&session_name)
+        {
+            let _ = lifecycle::kill_pid(pid);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<ExitCode, CliError> {
+    match &env.command {
+        EnvCommand::Start { name } => run_env_start(args, name).await,
+    }
+}
+
+async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliError> {
+    let config = load_config(args.config.as_deref().map(Path::new))
+        .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    let env_def = config
+        .env(env_name)
+        .map_err(|e| CliError::CommandFailed(e.to_string()))?
+        .clone();
+    validate_env_can_ifaces(&env_def)?;
+    ensure_sessions_available(&env_def).await?;
+
+    let mut started_sessions = Vec::new();
+    let result = start_env_internal(env_name, &env_def, &mut started_sessions).await;
+    if let Err(err) = result {
+        rollback_started_sessions(&started_sessions).await;
+        return Err(err);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn validate_recipe_preconditions(
+    recipe: &crate::config::recipe::RecipeDef,
+    _config: &crate::config::AppConfig,
+    _args: &CliArgs,
+) -> Result<(), CliError> {
+    let sessions = lifecycle::list_sessions()
+        .await
+        .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    let running = sessions
+        .iter()
+        .filter(|(_, _, is_running, _)| *is_running)
+        .map(|(name, _, _, env)| (name.clone(), env.clone()))
+        .collect::<Vec<_>>();
+
+    if let Some(env_name) = &recipe.env {
+        let has_env = running
+            .iter()
+            .any(|(_, env)| env.as_ref() == Some(env_name));
+        if !has_env {
+            return Err(CliError::CommandFailed(format!(
+                "recipe requires env '{env_name}', but no matching running sessions were found"
+            )));
+        }
+    }
+
+    for session_name in &recipe.sessions {
+        let is_running = running.iter().any(|(name, _)| name == session_name);
+        if !is_running {
+            return Err(CliError::CommandFailed(format!(
+                "recipe requires session '{session_name}' to be running"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_env_can_ifaces(env_def: &EnvDef) -> Result<(), CliError> {
+    #[cfg(target_os = "linux")]
+    {
+        for bus in env_def.can.values() {
+            let iface_path = Path::new("/sys/class/net").join(&bus.vcan);
+            if !iface_path.exists() {
+                return Err(CliError::CommandFailed(format!(
+                    "VCAN interface '{}' does not exist",
+                    bus.vcan
+                )));
+            }
+            let operstate_path = iface_path.join("operstate");
+            let state = std::fs::read_to_string(&operstate_path)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string();
+            if state != "up" && state != "unknown" {
+                return Err(CliError::CommandFailed(format!(
+                    "VCAN interface '{}' is not up (state: {state})",
+                    bus.vcan
+                )));
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = env_def;
+    }
+    Ok(())
+}
+
+async fn ensure_sessions_available(env_def: &EnvDef) -> Result<(), CliError> {
+    let sessions = lifecycle::list_sessions()
+        .await
+        .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    for session in &env_def.sessions {
+        if sessions
+            .iter()
+            .any(|(name, _, running, _)| name == &session.name && *running)
+        {
+            return Err(CliError::CommandFailed(format!(
+                "session '{}' is already running",
+                session.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn start_env_internal(
+    env_name: &str,
+    env_def: &EnvDef,
+    started_sessions: &mut Vec<String>,
+) -> Result<(), CliError> {
+    for session in &env_def.sessions {
+        let response = send_action(
+            &session.name,
+            Action::Load {
+                libpath: session.lib.clone(),
+                env_tag: Some(env_name.to_string()),
+            },
+        )
+        .await?;
+        if !response.success {
+            return Err(CliError::CommandFailed(response_error(&response)));
+        }
+        started_sessions.push(session.name.clone());
+    }
+
+    for (bus_name, bus) in &env_def.can {
+        apply_env_bus_wiring(bus_name, bus).await?;
+    }
+    Ok(())
+}
+
+async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), CliError> {
+    for member in &bus.members {
+        let (session_name, member_bus_name) = parse_env_member(member, bus_name)?;
+        send_action_success(
+            &session_name,
+            Action::CanAttach {
+                bus_name: member_bus_name.clone(),
+                vcan_iface: bus.vcan.clone(),
+            },
+        )
+        .await?;
+        if let Some(dbc_path) = &bus.dbc {
+            send_action_success(
+                &session_name,
+                Action::CanLoadDbc {
+                    bus_name: member_bus_name,
+                    path: dbc_path.clone(),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_env_member(member: &str, default_bus_name: &str) -> Result<(String, String), CliError> {
+    if let Some((session_name, bus_name)) = member.split_once(':') {
+        if session_name.is_empty() || bus_name.is_empty() {
+            return Err(CliError::CommandFailed(format!(
+                "invalid env bus member '{member}'"
+            )));
+        }
+        return Ok((session_name.to_string(), bus_name.to_string()));
+    }
+    if member.is_empty() {
+        return Err(CliError::CommandFailed("empty env bus member".to_string()));
+    }
+    Ok((member.to_string(), default_bus_name.to_string()))
+}
+
+async fn rollback_started_sessions(started_sessions: &[String]) {
+    for session_name in started_sessions {
+        if send_action_success(session_name, Action::Close)
+            .await
+            .is_err()
+            && let Some(pid) = lifecycle::read_pid(session_name)
+        {
+            let _ = lifecycle::kill_pid(pid);
+        }
+    }
 }
 
 fn compile_recipe_steps(

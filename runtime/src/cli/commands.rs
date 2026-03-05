@@ -9,6 +9,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let action = match command {
         Command::Load { libpath } => Action::Load {
             libpath: libpath.clone(),
+            env_tag: args.env_tag.clone(),
         },
         Command::Info => Action::Info,
         Command::Signals => Action::Signals,
@@ -44,7 +45,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Set(set) => Action::Set {
             writes: parse_set_entries(set)?,
         },
-        Command::Close => Action::Close,
+        Command::Close(close) if !close.all && close.env.is_none() => Action::Close,
         Command::Session(session) => match session.command {
             Some(SessionCommand::List) => Action::SessionList,
             None => Action::SessionStatus,
@@ -60,9 +61,9 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             },
             TimeCommand::Status => Action::TimeStatus,
         },
-        Command::Watch(_) | Command::Run(_) => {
+        Command::Watch(_) | Command::Run(_) | Command::Env(_) | Command::Close(_) => {
             return Err(CliError::CommandFailed(
-                "watch/run are handled by the CLI executor".to_string(),
+                "command is handled by the CLI executor".to_string(),
             ));
         }
     };

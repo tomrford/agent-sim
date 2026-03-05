@@ -22,6 +22,7 @@ use tokio::time::{Duration, timeout};
 pub struct DaemonState {
     session: String,
     socket_path: PathBuf,
+    env: Option<String>,
     project: Project,
     can_attached: HashMap<String, AttachedCanBus>,
     dbc_overlays: HashMap<String, DbcBusOverlay>,
@@ -41,10 +42,16 @@ struct ActionMessage {
 }
 
 impl DaemonState {
-    pub fn new(session: String, socket_path: PathBuf, project: Project) -> Self {
+    pub fn new(
+        session: String,
+        socket_path: PathBuf,
+        project: Project,
+        env: Option<String>,
+    ) -> Self {
         Self {
             session,
             socket_path,
+            env,
             project,
             can_attached: HashMap::new(),
             dbc_overlays: HashMap::new(),
@@ -134,6 +141,7 @@ pub async fn run_listener(
     session: String,
     socket_path: PathBuf,
     project: Project,
+    env: Option<String>,
 ) -> Result<(), std::io::Error> {
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
@@ -144,8 +152,10 @@ pub async fn run_listener(
     let listener = UnixListener::bind(&socket_path)?;
     let pid_path = crate::daemon::lifecycle::pid_path(&session);
     std::fs::write(&pid_path, std::process::id().to_string())?;
+    crate::daemon::lifecycle::write_env_tag(&session, env.as_deref())
+        .map_err(std::io::Error::other)?;
 
-    let state = DaemonState::new(session, socket_path.clone(), project);
+    let state = DaemonState::new(session.clone(), socket_path.clone(), project, env);
     let (action_tx, action_rx) = mpsc::channel::<ActionMessage>(256);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -187,6 +197,7 @@ pub async fn run_listener(
     if pid_path.exists() {
         let _ = std::fs::remove_file(pid_path);
     }
+    crate::daemon::lifecycle::remove_env_tag(&session);
 
     if let Some(err) = listener_error {
         return Err(err);
@@ -296,7 +307,7 @@ async fn handle_action(request: Request, state: &mut DaemonState) -> Response {
 async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<ResponseData, String> {
     match action {
         Action::Ping => Ok(ResponseData::Ack),
-        Action::Load { libpath } => {
+        Action::Load { libpath, .. } => {
             let bound = state.project.libpath.display().to_string();
             if libpath != bound {
                 return Err(format!(
@@ -528,16 +539,18 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             session: state.session.clone(),
             socket_path: state.socket_path.display().to_string(),
             running: true,
+            env: state.env.clone(),
         }),
         Action::SessionList => {
             let sessions = crate::daemon::lifecycle::list_sessions()
                 .await
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|(name, socket_path, running)| SessionInfoData {
+                .map(|(name, socket_path, running, env)| SessionInfoData {
                     name,
                     socket_path: socket_path.display().to_string(),
                     running,
+                    env,
                 })
                 .collect::<Vec<_>>();
             Ok(ResponseData::SessionList { sessions })

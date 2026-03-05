@@ -22,7 +22,9 @@ pub enum ConnectionError {
 
 pub async fn send_request(session: &str, request: &Request) -> Result<Response, ConnectionError> {
     match &request.action {
-        Action::Load { libpath } => bootstrap_daemon(session, libpath).await?,
+        Action::Load { libpath, env_tag } => {
+            bootstrap_daemon(session, libpath, env_tag.as_deref()).await?
+        }
         _ => ensure_daemon_running(session).await?,
     }
     let socket = socket_path(session);

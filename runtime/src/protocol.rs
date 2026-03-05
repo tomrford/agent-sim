@@ -26,6 +26,7 @@ pub enum Action {
     Ping,
     Load {
         libpath: String,
+        env_tag: Option<String>,
     },
     Info,
     Signals,
@@ -159,6 +160,7 @@ pub enum ResponseData {
         session: String,
         socket_path: String,
         running: bool,
+        env: Option<String>,
     },
     SessionList {
         sessions: Vec<SessionInfoData>,
@@ -202,6 +204,7 @@ pub struct SessionInfoData {
     pub name: String,
     pub socket_path: String,
     pub running: bool,
+    pub env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

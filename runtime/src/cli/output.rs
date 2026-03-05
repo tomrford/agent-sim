@@ -170,20 +170,23 @@ pub fn print_response(response: &Response, json_mode: bool) {
             session,
             socket_path,
             running,
+            env,
         }) => {
             println!("Session: {session}");
             println!("Socket: {socket_path}");
             println!("Running: {running}");
+            println!("Env: {}", env.clone().unwrap_or_else(|| "-".to_string()));
         }
         Some(ResponseData::SessionList { sessions }) => {
             let mut table = Table::new();
             table
                 .load_preset(UTF8_HORIZONTAL_ONLY)
-                .set_header(vec!["Session", "Running", "Socket"]);
+                .set_header(vec!["Session", "Running", "Env", "Socket"]);
             for item in sessions {
                 table.add_row(vec![
                     item.name.clone(),
                     item.running.to_string(),
+                    item.env.clone().unwrap_or_else(|| "-".to_string()),
                     item.socket_path.clone(),
                 ]);
             }

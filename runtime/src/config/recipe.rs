@@ -19,6 +19,8 @@ pub struct FileConfig {
     pub defaults: Option<DefaultsConfig>,
     #[serde(default)]
     pub recipe: BTreeMap<String, RecipeDef>,
+    #[serde(default)]
+    pub env: BTreeMap<String, EnvDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +59,28 @@ pub struct AssertSpec {
     pub lte: Option<f64>,
     pub approx: Option<f64>,
     pub tolerance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvDef {
+    #[serde(default)]
+    pub sessions: Vec<EnvSession>,
+    #[serde(default)]
+    pub can: BTreeMap<String, EnvCanBus>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvSession {
+    pub name: String,
+    pub lib: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnvCanBus {
+    #[serde(default)]
+    pub members: Vec<String>,
+    pub vcan: String,
+    pub dbc: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

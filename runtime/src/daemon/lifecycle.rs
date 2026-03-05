@@ -24,6 +24,10 @@ pub fn pid_path(session: &str) -> PathBuf {
     session_root().join(format!("{session}.pid"))
 }
 
+pub fn meta_path(session: &str) -> PathBuf {
+    session_root().join(format!("{session}.meta"))
+}
+
 pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
     std::fs::create_dir_all(session_root())?;
     let socket = socket_path(session);
@@ -33,13 +37,17 @@ pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
     Err(DaemonError::NotRunning(session.to_string()))
 }
 
-pub async fn bootstrap_daemon(session: &str, libpath: &str) -> Result<(), DaemonError> {
+pub async fn bootstrap_daemon(
+    session: &str,
+    libpath: &str,
+    env_tag: Option<&str>,
+) -> Result<(), DaemonError> {
     std::fs::create_dir_all(session_root())?;
     let socket = socket_path(session);
     if can_connect(&socket).await {
         return Err(DaemonError::AlreadyRunning(session.to_string()));
     }
-    let mut child = spawn_daemon(session, libpath)?;
+    let mut child = spawn_daemon(session, libpath, env_tag)?;
 
     let timeout = Duration::from_secs(5);
     let mut waited = Duration::from_millis(0);
@@ -66,17 +74,25 @@ pub async fn bootstrap_daemon(session: &str, libpath: &str) -> Result<(), Daemon
     Err(DaemonError::StartupTimeout)
 }
 
-fn spawn_daemon(session: &str, libpath: &str) -> Result<std::process::Child, DaemonError> {
+fn spawn_daemon(
+    session: &str,
+    libpath: &str,
+    env_tag: Option<&str>,
+) -> Result<std::process::Child, DaemonError> {
     let exe = std::env::current_exe()?;
-    let child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("--daemon")
         .arg("--session")
         .arg(session)
         .arg("--libpath")
         .arg(libpath)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(env_tag) = env_tag {
+        command.arg("--env-tag").arg(env_tag);
+    }
+    let child = command.spawn()?;
     Ok(child)
 }
 
@@ -84,7 +100,7 @@ async fn can_connect(socket: &Path) -> bool {
     UnixStream::connect(socket).await.is_ok()
 }
 
-pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool)>, DaemonError> {
+pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
     let root = session_root();
     std::fs::create_dir_all(&root)?;
     let mut out = Vec::new();
@@ -98,8 +114,61 @@ pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool)>, DaemonError
             continue;
         };
         let running = can_connect(&path).await;
-        out.push((stem.to_string(), path, running));
+        let env = read_env_tag(stem);
+        out.push((stem.to_string(), path, running, env));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+pub fn write_env_tag(session: &str, env: Option<&str>) -> Result<(), DaemonError> {
+    let path = meta_path(session);
+    if let Some(env) = env {
+        std::fs::write(path, env)?;
+    } else if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+pub fn read_env_tag(session: &str) -> Option<String> {
+    let path = meta_path(session);
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn remove_env_tag(session: &str) {
+    let path = meta_path(session);
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn read_pid(session: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_path(session))
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+}
+
+pub fn kill_pid(pid: u32) -> Result<(), DaemonError> {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        if result != 0 {
+            return Err(DaemonError::Request(format!(
+                "failed to kill pid {pid}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err(DaemonError::Request(
+            "pid kill fallback is not supported on this platform".to_string(),
+        ))
+    }
 }
