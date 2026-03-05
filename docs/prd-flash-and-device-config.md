@@ -1,31 +1,54 @@
-# PRD: Flash Memory Initialisation & Device Configuration
+# PRD: Flash Memory Initialization & Device Configuration
+
+Status: draft
+
+Related:
+
+- `docs/env-daemon-prd.md`
+- `docs/terminology-and-migration-prd.md`
+- `docs/template-guide.md`
 
 ## Context
 
-agent-sim models firmware as shared libraries (DLLs) with a signal-based I/O surface. State initialisation today is handled entirely inside the DLL's `sim_init()` — the adapter author zeros a Zig struct and sets sane defaults. There is no mechanism for the host runtime to push pre-existing data (calibration tables, lookup data, configuration blocks) into a DLL before it boots.
+`agent-sim` models firmware as shared libraries loaded into per-device runtime processes. Today, startup is driven by the `load` path in the Rust runtime:
 
-In real embedded systems, firmware reads static data from flash memory at fixed addresses. When porting such firmware into a SIL DLL, the adapter author needs a way to declare a byte-addressable memory region and have the runtime populate it from standard file formats (Intel HEX, Motorola S-record, raw binary) before `sim_init()` runs — exactly like flashing an MCU before power-on.
+1. the CLI builds `Action::Load { libpath, env_tag }`
+2. `runtime/src/connection.rs` bootstraps a session daemon for that library
+3. `runtime/src/daemon/mod.rs` calls `Project::load(libpath)`
+4. `runtime/src/sim/project.rs` binds symbols, reads metadata, then calls `sim_init()`
 
-This feature also introduces a **device** abstraction in the TOML config: a named bundle of a DLL path plus its flash configuration. Environments then reference devices by name rather than embedding lib paths directly, creating a clean separation between "what a device is" and "how devices are wired together."
+There is currently no mechanism for the host runtime to push pre-existing non-volatile data into a library before `sim_init()` runs. Adapter authors must hardcode calibration/configuration data in Zig source or leave it zeroed.
+
+In real embedded systems, firmware reads static data from flash at fixed addresses. When porting such firmware into `agent-sim`, the adapter author needs a way to declare a byte-addressable flash region and have the runtime populate it from standard file formats before boot, just like flashing an MCU before power-on.
+
+This feature also introduces a `device` abstraction in config: a named bundle of a library path plus flash configuration. Env definitions then reference devices instead of repeating raw library paths inline.
+
+Terminology note:
+
+- This document prefers `instance` for the running thing and `device` for the reusable definition, following `docs/terminology-and-migration-prd.md`.
+- When referring to current code surfaces, it still uses the repo's existing names such as `session`, `sessions`, and `env_tag`.
 
 ### Non-Goals
 
-- The runtime does not interpret flash contents — it pushes raw bytes. Memory layout and access patterns are the DLL author's responsibility.
-- No read-back of flash from the host side (write-only from runtime to DLL).
-- No runtime memory-mapped I/O or address-space emulation — this is a data seeding mechanism, not an MCU memory controller.
-- No `mint` tool integration in V1 (noted as future exploration for parametric hex generation from `../mint`).
+- The runtime does not interpret flash contents. It only writes raw bytes.
+- No host-side flash read-back in V1.
+- No runtime memory-mapped I/O or address-space emulation.
+- No env-owned persistent flash state; flashing remains part of device/project load, not transport orchestration.
+- No `mint` integration in V1.
 
 ---
 
 ## Decisions
 
-- **ABI shape**: single `sim_flash_write(base_addr, data, len)` function, called once per region. The runtime calls it N times for N flash blocks. Simpler than a batch descriptor approach and maps naturally to how hex file records are structured.
-- **Optional export pattern**: follows the CAN precedent — if `sim_flash_write` is present, the DLL supports flash. Single symbol; no all-or-nothing group since there's no read-back or enumeration needed from the host.
-- **Call ordering**: flash writes happen **before** `sim_init()`. The DLL receives all flash data first, then `init()` runs with flash already populated — matching real hardware where flash is written before the MCU boots.
-- **Config model**: `[device.<name>]` sections own lib path + flash blocks. `[env.<name>]` sessions reference devices by name. This is a clean split that doesn't over-abstract — no separate `[mem]` indirection for V1.
-- **File formats (V1)**: Intel HEX (`.hex`/`.ihex`), Motorola S-record (`.mot`/`.srec`/`.s19`), raw binary with explicit base address.
-- **Inline values (V1)**: typed scalar values at explicit addresses, specified directly in TOML. Useful for injecting a single calibration constant without creating a file.
-- **DLL-side responsibility**: the adapter author declares a memory region in `Ctx` (e.g. `flash: [N]u8`) and implements `sim_flash_write` to copy data into it. How that memory is indexed and used during `tick()` is entirely up to the adapter.
+- **ABI shape**: one optional export, `sim_flash_write(base_addr, data, len)`, called once per resolved region.
+- **Optional export pattern**: independent optional symbol, similar in spirit to CAN/shared optional exports but without an all-or-nothing group because there is only one write API.
+- **Call ordering**: flash writes happen before `sim_init()`.
+- **Load-path integration**: flash must be threaded through the initial load/bootstrap path, not added as a separate post-load RPC. In current code, the daemon is already bootstrapped and `Project::load(...)` has already run before `Action::Load` reaches the request router.
+- **Ownership boundary**: flash is device-local state. The env daemon work should route a richer load spec to per-device workers, not take ownership of flash as env-scoped runtime state.
+- **Config model**: `[device.<name>]` holds `lib` plus `flash`; `[env.<name>]` references devices for each instance/session entry.
+- **File formats (V1)**: Intel HEX, Motorola S-record, and raw binary with explicit base address.
+- **Inline values (V1)**: typed scalar values at explicit addresses, serialized directly from TOML.
+- **DLL/library-side responsibility**: the adapter author owns flash layout inside `Ctx` and implements the address-to-storage mapping in `sim_flash_write`.
 
 ---
 
@@ -33,73 +56,98 @@ This feature also introduces a **device** abstraction in the TOML config: a name
 
 ### Problem
 
-DLLs that model firmware reading from fixed flash addresses have no way to receive that data from the host. The adapter author must either hardcode the data in Zig source or leave it zeroed, neither of which supports runtime-configurable simulation scenarios (different calibration sets, A/B testing of parameter tables, etc.).
+Libraries that model firmware reading from fixed flash addresses have no host-provided preload path. That blocks realistic calibration tables, lookup tables, device config blobs, and A/B test images.
 
 ### ABI
 
-New optional DLL export:
+New optional export in `include/sim_api.h`:
 
 ```c
 /**
- * @brief Write a block of data to the DLL's flash memory region.
+ * @brief Write a block of data to the library's flash region.
  *
- * Called by the host before sim_init() to populate flash contents.
- * May be called multiple times (once per region/record).
+ * Called by the host before sim_init() to populate non-volatile state.
+ * May be called multiple times.
  *
- * The DLL is responsible for managing its own memory layout.
+ * The library owns its memory layout.
  * Overlapping writes are applied in order (last write wins).
- * Writes to addresses outside the DLL's declared range should
- * return SIM_ERR_INVALID_ARG.
- *
- * @param base_addr  Start address for this write
- * @param data       Pointer to raw bytes
- * @param len        Number of bytes to write
+ * Out-of-range writes should return SIM_ERR_INVALID_ARG.
  */
 SimStatus sim_flash_write(uint32_t base_addr, const uint8_t *data, uint32_t len);
 ```
 
 ### Capability Detection
 
-In `Project::load`, after symbol binding:
+In `Project::load`, after binding the required core symbols:
 
 ```rust
 let sim_flash_write: Option<SimFlashWriteFn> =
-    unsafe { library.get(b"sim_flash_write\0") }.ok().map(|s| *s);
+    unsafe { library.get(b"sim_flash_write\0") }.ok().map(|symbol| *symbol);
 ```
 
-If the config specifies flash blocks for a device whose DLL does not export `sim_flash_write`, loading fails with a clear error.
+Rules:
 
-If the DLL exports `sim_flash_write` but no flash blocks are configured, nothing happens — the DLL boots with default/zeroed flash, same as today.
+- If flash is configured for a device and the library does not export `sim_flash_write`, loading fails clearly.
+- If the library exports `sim_flash_write` but no flash is configured, nothing special happens.
 
 ### Load Sequence Change
 
-Current:
-```
-dlopen → bind symbols → read catalog → sim_init() → enumerate CAN/shared
+Current `Project::load(...)` shape:
+
+```text
+dlopen -> bind symbols -> read tick/signal metadata -> sim_init() -> enumerate CAN/shared
 ```
 
-New:
-```
-dlopen → bind symbols → read catalog → [sim_flash_write() × N] → sim_init() → enumerate CAN/shared
+Target shape:
+
+```text
+dlopen -> bind symbols -> read tick/signal metadata -> sim_flash_write() x N -> sim_init() -> enumerate CAN/shared
 ```
 
-Flash writes are injected between symbol binding and `sim_init()`. The signal catalog and tick duration are read before flash (they don't depend on flash contents). CAN/shared enumeration stays after init.
+Reading tick duration and signal metadata before flash remains fine because those surfaces are library metadata, not instance state.
+
+### Bootstrap Plumbing
+
+The current load path is important here:
+
+- `runtime/src/cli/commands.rs` builds `Action::Load { libpath, env_tag }`
+- `runtime/src/connection.rs` uses that action to call `bootstrap_daemon(...)`
+- `runtime/src/daemon/mod.rs` immediately calls `Project::load(libpath)`
+
+Because of that, a separate later action like `FlashWrite { ... }` is the wrong starting point. Flash support should instead introduce a richer load spec that can flow through bootstrap:
+
+```rust
+pub struct LoadSpec {
+    pub libpath: String,
+    pub env_tag: Option<String>,
+    pub flash: Vec<ResolvedFlashRegion>,
+}
+```
+
+Recommended direction:
+
+- extend `Action::Load`
+- extend `bootstrap_daemon(...)`
+- extend `daemon::run(...)`
+- extend `Project::load(...)`
+
+This same load spec can later be routed by the env daemon without changing the core flash semantics.
 
 ### Zig Template
+
+Library-side pattern in `adapter.zig`:
 
 ```zig
 const sim_types = @import("sim_types.zig");
 pub const SimStatus = sim_types.SimStatus;
 
-// Example: 256 KB flash region starting at 0x0800_0000
 const FLASH_BASE: u32 = 0x0800_0000;
 const FLASH_SIZE: u32 = 256 * 1024;
 
 pub const Ctx = struct {
-    // Flash memory region
-    flash: [FLASH_SIZE]u8 = [_]u8{0xFF} ** FLASH_SIZE,  // 0xFF = erased flash
+    flash: [FLASH_SIZE]u8 = [_]u8{0xFF} ** FLASH_SIZE,
 
-    // ... existing signal state ...
+    // Other volatile runtime state goes here.
 };
 
 pub fn flashWrite(ctx: *Ctx, base_addr: u32, data: [*]const u8, len: u32) SimStatus {
@@ -111,7 +159,7 @@ pub fn flashWrite(ctx: *Ctx, base_addr: u32, data: [*]const u8, len: u32) SimSta
 }
 ```
 
-In `root.zig`, the export wrapper:
+Export wrapper in `root.zig`:
 
 ```zig
 pub export fn sim_flash_write(base_addr: u32, data: ?[*]const u8, len: u32) SimStatus {
@@ -121,17 +169,22 @@ pub export fn sim_flash_write(base_addr: u32, data: ?[*]const u8, len: u32) SimS
 }
 ```
 
-Note: `sim_flash_write` is called before `sim_init()`, so it operates on `g_ctx` directly (not through `requireInitialized()`). The context is default-initialized at declaration (`var g_ctx: adapter.Ctx = .{}`), so flash writes land on a valid struct. `sim_init()` then runs without re-zeroing flash — the adapter author must ensure their `init()` does not overwrite the flash region.
+Important template caveat:
+
+- The current template in `template/src/root.zig` does `g_ctx = .{}` inside `sim_init()`.
+- The current template in `template/src/adapter.zig` also does `ctx.* = .{}` in `init()` and `reset()`.
+- A flash-capable template must change that behavior. Preserving flash cannot be done only by adding `sim_flash_write`; either `root.zig` or the adapter must explicitly preserve non-volatile fields while reinitializing volatile state.
 
 ### Deliverables
 
-- [ ] `sim_flash_write` signature in `sim_api.h`
+- [ ] `sim_flash_write` added to `include/sim_api.h`
 - [ ] Optional symbol binding in `Project::load`
-- [ ] Flash write calls injected before `sim_init()` in load sequence
-- [ ] Zig template with `flashWrite` pattern and `root.zig` export
-- [ ] `sim_types.zig` updated if needed
-- [ ] Error if config has flash blocks but DLL lacks `sim_flash_write`
-- [ ] Unit test: flash write → init → read signal derived from flash data
+- [ ] Flash writes injected before `sim_init()`
+- [ ] Load/bootstrap path extended to carry flash data/spec
+- [ ] Zig template updated with a safe flash-preserving pattern
+- [ ] `docs/template-guide.md` updated with flash-specific init/reset guidance
+- [ ] Error if flash is configured but `sim_flash_write` is missing
+- [ ] Unit test: flash write -> init -> read signal derived from flash data
 
 ---
 
@@ -139,38 +192,48 @@ Note: `sim_flash_write` is called before `sim_init()`, so it operates on `g_ctx`
 
 ### Problem
 
-Flash data comes in standard embedded file formats. The runtime needs to parse these into `(base_addr, data, len)` tuples for `sim_flash_write` calls.
+Flash inputs come from standard embedded file formats. The runtime needs to convert them into resolved `(base_addr, bytes)` regions.
 
 ### Supported Formats
 
 **Intel HEX** (`.hex`, `.ihex`)
-- Record types 00 (data), 01 (EOF), 02 (extended segment address), 04 (extended linear address)
-- Produces a set of `(address, bytes)` regions
-- Checksum validation on each record
+
+- Record types 00, 01, 02, 04
+- Per-record checksum validation
+- Output: zero or more resolved regions
 
 **Motorola S-record** (`.mot`, `.srec`, `.s19`, `.s28`, `.s37`)
-- S0 (header), S1/S2/S3 (data with 16/24/32-bit addresses), S5 (count), S7/S8/S9 (end)
-- Produces a set of `(address, bytes)` regions
-- Checksum validation on each record
+
+- S1/S2/S3 data records, plus standard header/count/end records
+- Per-record checksum validation
+- Output: zero or more resolved regions
 
 **Raw binary** (`.bin`)
-- Flat byte array, requires an explicit `base` address in config
-- Single `(base, entire_file)` region
+
+- Flat byte array
+- Requires explicit `base` in config
+- Output: one resolved region
 
 ### Parser Design
 
 ```rust
-pub struct FlashRegion {
+pub struct ResolvedFlashRegion {
     pub base_addr: u32,
     pub data: Vec<u8>,
 }
 
-pub fn parse_intel_hex(content: &str) -> Result<Vec<FlashRegion>, FlashParseError>;
-pub fn parse_srec(content: &str) -> Result<Vec<FlashRegion>, FlashParseError>;
-pub fn parse_raw_binary(bytes: &[u8], base: u32) -> FlashRegion;
+pub fn parse_intel_hex(content: &str) -> Result<Vec<ResolvedFlashRegion>, FlashParseError>;
+pub fn parse_srec(content: &str) -> Result<Vec<ResolvedFlashRegion>, FlashParseError>;
+pub fn parse_raw_binary(bytes: &[u8], base: u32) -> ResolvedFlashRegion;
 ```
 
-Format detection: explicit in config (`format = "ihex"` / `"srec"` / `"bin"`). If omitted, inferred from file extension. Ambiguous cases fail with a clear error.
+Format detection:
+
+- explicit `format = "ihex" | "srec" | "bin"` wins
+- otherwise infer from extension
+- ambiguous or unsupported cases fail clearly
+
+This parser layer should be reusable from both standalone `load` flows and env/device startup flows.
 
 ### Deliverables
 
@@ -178,15 +241,31 @@ Format detection: explicit in config (`format = "ihex"` / `"srec"` / `"bin"`). I
 - [ ] Motorola S-record parser with checksum validation
 - [ ] Raw binary loader with explicit base address
 - [ ] Format detection from config or file extension
-- [ ] Unit tests for each format (valid files, corrupt checksums, address overflow)
+- [ ] Unit tests for valid inputs, corrupt checksums, overlap handling, and address overflow
 
 ---
 
-## Phase 3: Device Configuration & TOML Schema
+## Phase 3: Load/Bootstrap Plumbing and Device Config
 
 ### Problem
 
-The current `[env.<name>]` section embeds lib paths inline in sessions. Adding flash configuration alongside lib paths makes sessions unwieldy. A separate device abstraction provides a clean place to attach per-device configuration.
+Today, `runtime/src/config/recipe.rs` models env membership as:
+
+```rust
+pub struct EnvSession {
+    pub name: String,
+    pub lib: String,
+}
+```
+
+That is too narrow for flash-aware devices and forces env definitions to mix:
+
+- instance identity
+- device identity
+- library path
+- future device-local boot inputs
+
+Device definitions give that data a stable home and keep env topology focused on wiring.
 
 ### Config Schema
 
@@ -197,52 +276,58 @@ The current `[env.<name>]` section embeds lib paths inline in sessions. Adding f
 lib = "./zig-out/lib/libecu1.dylib"
 flash = [
     { file = "./calibration.hex", format = "ihex" },
-    { file = "./lookup_tables.mot" },                          # format inferred from extension
+    { file = "./lookup_tables.mot" },
     { file = "./raw_params.bin", format = "bin", base = "0x08040000" },
-    { u32 = 42, addr = "0x08060000" },                         # inline scalar
+    { u32 = 42, addr = "0x08060000" },
 ]
 
 [device.ecu2]
 lib = "./zig-out/lib/libecu2.dylib"
-# No flash — boots with default state
 
 # -- Environments -----------------------------------------------------------
 
 [env.bench]
+# Current code uses `sessions`; docs use "instance" in prose.
 sessions = [
-    { name = "ecu1", device = "ecu1" },
-    { name = "ecu2", device = "ecu2" },
+    { name = "ecu1-a", device = "ecu1" },
+    { name = "ecu2-a", device = "ecu2" },
 ]
 
 [env.bench.can.chassis]
-members = ["ecu1", "ecu2"]
+members = ["ecu1-a", "ecu2-a"]
 vcan = "vcan0"
 dbc = "./chassis.dbc"
 ```
 
-**Inline values** supported in V1:
+### Inline Values
 
 ```toml
-# Typed scalars at explicit addresses
 { u32 = 42, addr = "0x08060000" }
 { i32 = -1, addr = "0x08060004" }
 { f32 = 3.14, addr = "0x08060008" }
-{ bool = true, addr = "0x0806000C" }     # 1 byte: 0x01
+{ bool = true, addr = "0x0806000C" }
 ```
 
-Values are serialised to little-endian bytes (matching ARM/most embedded targets). Byte order could become configurable in V2 if needed.
+V1 serializes inline values as little-endian bytes.
 
-**Backwards compatibility**: `[env]` sessions can still use `lib = "..."` directly for environments that don't need flash. If both `device` and `lib` are present on a session, that's an error.
+### Backwards Compatibility
+
+- Existing env entries with direct `lib = "..."` should keep working.
+- `device` and `lib` on the same entry are mutually exclusive.
+- `sessions` remains the concrete parser field unless the terminology work adds an `instances` alias in the same stream.
+
+Still-valid direct form:
 
 ```toml
-# Still works — no device, no flash
 [env.simple]
 sessions = [
-    { name = "default", lib = "./my_dll.dylib" },
+    { name = "default", lib = "./my_lib.dylib" },
 ]
 ```
 
-### Rust Config Types
+### Rust Config Shapes
+
+Target delta from the current config model:
 
 ```rust
 #[derive(Debug, Clone, Deserialize)]
@@ -257,119 +342,138 @@ pub struct DeviceDef {
 pub enum FlashBlockDef {
     File {
         file: String,
-        format: Option<String>,   // "ihex", "srec", "bin"
-        base: Option<String>,     // required for "bin", hex string e.g. "0x08000000"
+        format: Option<String>,
+        base: Option<String>,
     },
     InlineU32 { u32: u32, addr: String },
     InlineI32 { i32: i32, addr: String },
-    InlineF32 { f32: f64, addr: String },   // TOML floats are f64; narrowed to f32
+    InlineF32 { f32: f64, addr: String },
     InlineBool { bool: bool, addr: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvSession {
     pub name: String,
-    pub lib: Option<String>,       // direct lib path (existing)
-    pub device: Option<String>,    // reference to [device.<name>]
+    pub lib: Option<String>,
+    pub device: Option<String>,
 }
 ```
 
-### `defaults.load` Interaction
+`FileConfig` also gains:
 
-The existing `[defaults.load]` section provides a default lib path for single-session `agent-sim load` commands. This is orthogonal to devices — devices are for env sessions. A device does not affect the `load` default.
-
-### Env Start Changes
-
-When `env start` encounters a session with `device = "ecu1"`:
-
-1. Resolve `device.ecu1` from config
-2. Spawn daemon with `device.ecu1.lib`
-3. For each flash block in `device.ecu1.flash`:
-   - Parse the file (or serialise the inline value)
-   - Send flash write action(s) to the daemon
-4. Send init action (or let the daemon's load sequence handle init after flash)
-5. Continue with CAN/shared wiring as before
-
-This means the daemon needs a new protocol action:
-
-```
-FlashWrite { base_addr: u32, data: Vec<u8> }
+```rust
+#[serde(default)]
+pub device: BTreeMap<String, DeviceDef>,
 ```
 
-Or, flash writes could be pushed during `Project::load()` itself if the flash config is passed to the load action. This avoids a separate protocol round-trip.
+### Path Resolution
+
+Flash file paths should follow the same behavior `env start` already uses for DBC/shared-library paths:
+
+- relative to the config file directory when a config file path is known
+- otherwise relative to the current working directory
+- canonicalized to an absolute path before daemon startup
+
+### Env Integration
+
+Current `runtime/src/cli/env.rs` does CLI-side fan-out. The env-daemon PRD changes who owns orchestration, but it should not change the flashing boundary:
+
+1. resolve the instance entry
+2. resolve `device.<name>` if present
+3. resolve/canonicalize flash sources
+4. parse inline values and files into `ResolvedFlashRegion`s
+5. build a `LoadSpec`
+6. hand that load spec to the current bootstrap path or the future env daemon
+7. let per-device load perform `sim_flash_write(...)` before `sim_init()`
+8. continue with CAN/shared/env wiring
+
+Key point: flashing belongs inside device load. It should not become an env-owned long-lived control-plane subsystem.
 
 ### Deliverables
 
-- [ ] `[device.<name>]` config section with `lib` and `flash` fields
-- [ ] `FlashBlockDef` enum (file + inline variants)
-- [ ] Inline value serialisation (little-endian bytes)
-- [ ] `EnvSession` updated to support `device` reference (with `lib` fallback)
-- [ ] Validation: `device` and `lib` mutually exclusive on a session
-- [ ] `env start` resolves devices, parses flash files, pushes data before init
-- [ ] File paths in flash blocks resolved relative to config file location
-- [ ] `agent-sim device list` CLI command (optional, nice-to-have)
+- [ ] `[device.<name>]` config section with `lib` and `flash`
+- [ ] `device` map added to config model
+- [ ] `FlashBlockDef` enum for file and inline variants
+- [ ] Inline value serialization to little-endian bytes
+- [ ] `EnvSession` updated to allow `device` or `lib`
+- [ ] Validation for `device`/`lib` mutual exclusivity and missing device references
+- [ ] Flash file paths resolved relative to config source path
+- [ ] Env startup builds a load spec instead of sending post-load flash RPCs
 
 ---
 
-## Phase 4: Standalone Flash Support (Non-Env)
+## Phase 4: Standalone Flash Support
 
 ### Problem
 
-Single-session workflows (`agent-sim load ./my_dll.dylib`) should also be able to load flash data without defining a full device + env.
+Single-instance workflows should also be able to preload flash without defining an env.
 
 ### Design
 
-Extend `[defaults.load]` and the `load` CLI command:
+Extend `[defaults.load]` and the `load` CLI so they both produce the same richer load spec used by env startup.
+
+Config:
 
 ```toml
 [defaults.load]
-lib = "./my_dll.dylib"
+lib = "./my_lib.dylib"
 flash = [
     { file = "./cal.hex" },
 ]
 ```
 
-Or via CLI flags:
+CLI:
 
-```
-agent-sim load ./my_dll.dylib --flash ./cal.hex --flash ./tables.bin:0x08040000
+```text
+agent-sim load ./my_lib.dylib --flash ./cal.hex --flash ./tables.bin:0x08040000
 ```
 
-The `--flash` flag accepts `path` or `path:base_addr` (base required for raw binary). Format is inferred from extension.
+The repeatable `--flash` flag accepts:
+
+- `path` for HEX/S-record files
+- `path:base_addr` for raw binary
 
 ### Deliverables
 
-- [ ] `flash` field in `[defaults.load]` config
-- [ ] `--flash` CLI flag on `load` command (repeatable)
-- [ ] Flash files parsed and written before `sim_init()` in single-session load path
+- [ ] `flash` field added to `[defaults.load]`
+- [ ] `load` CLI extended with repeatable `--flash`
+- [ ] CLI/defaults resolved into the same load-spec plumbing used by env/device startup
+- [ ] Flash parsed and written before `sim_init()` in standalone mode
 
 ---
 
 ## Open Questions
 
-1. **`sim_init()` interaction**: the current Zig template's `init()` does `ctx.* = .{}` which would zero the flash region. Adapter authors who use flash must write their `init()` to preserve it. Should the template guide this explicitly, or should `root.zig` manage it (e.g. save/restore flash across init)? **Recommendation**: document it clearly in the template guide — `init()` must not overwrite flash. This matches real firmware where flash is non-volatile across resets.
+1. **Template init/reset preservation**: should the template teach a split between non-volatile and volatile state, or should `root.zig` preserve flash fields automatically around `init()`/`reset()`? Recommendation: make the template pattern explicit and safe by default, rather than relying on every adapter author to remember it.
 
-2. **Reset semantics**: should `sim_reset()` re-apply flash data? In real hardware, reset doesn't erase flash. But the current `reset()` does `ctx.* = .{}`. Options: (a) document that adapter authors must preserve flash in reset, (b) have the runtime re-send flash writes before `sim_reset()`, (c) add a separate `sim_flash_erase()` for explicit erase. **Recommendation**: (a) for V1 — document it. The runtime doesn't track flash state after initial load.
+2. **Reset semantics**: in real hardware, reset preserves flash. That matches the env-daemon PRD's device-local reset framing. Recommendation: `sim_reset()` should not cause the runtime to re-flash; adapters/templates should preserve flash and only reset volatile state.
 
-3. **Address width**: `uint32_t base_addr` limits to 4 GB address space. Sufficient for all current ARM Cortex-M/R targets. If 64-bit targets are needed later, a V2 ABI bump would be required.
+3. **Address width**: `uint32_t base_addr` caps V1 at a 4 GB address space. Recommendation: keep it for V1.
 
-4. **Endianness for inline values**: V1 assumes little-endian (ARM). Should this be configurable per-device? **Recommendation**: no, little-endian only for V1. Add `endian = "big"` option in V2 if needed.
+4. **Inline endianness**: V1 assumes little-endian serialization. Recommendation: keep fixed little-endian behavior in V1.
+
+5. **`sessions` vs `instances` config spelling**: should config aliasing land here or in separate terminology work? Recommendation: do not block flash/device work on aliasing; keep `sessions` initially unless aliasing is low-risk.
 
 ---
 
 ## Phase Ordering
 
-```
-Phase 1: Flash ABI Extension
-    │
-    ▼
-Phase 2: File Format Parsers (can develop in parallel with Phase 1)
-    │
-    ▼
-Phase 3: Device Config & TOML Schema (depends on Phase 1 + 2)
-    │
-    ▼
-Phase 4: Standalone Flash Support (depends on Phase 2, light lift)
+```text
+Phase 1: Flash ABI extension
+    |
+    v
+Phase 2: Parser + resolved region model
+    |
+    v
+Phase 3: Load/bootstrap plumbing + device config
+    |
+    v
+Phase 4: Standalone load UX
 ```
 
-Phases 1 and 2 are independent and can be developed in parallel. Phase 3 ties them together with the config system. Phase 4 is a small extension of Phase 3.
+Notes:
+
+- Phases 1 and 2 are mostly independent.
+- Phase 3 is the key repo-specific step because of the current daemon bootstrap design and the config/model changes that hang off it.
+- Phase 4 should stay compatible with the env-daemon work by treating flash as part of per-device load, not env-owned transport orchestration.
