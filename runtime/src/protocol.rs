@@ -24,17 +24,41 @@ pub struct Request {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Action {
     Ping,
-    Load { libpath: String },
+    Load {
+        libpath: String,
+    },
     Info,
     Signals,
     Reset,
-    Get { selectors: Vec<String> },
-    Set { writes: BTreeMap<String, String> },
+    Get {
+        selectors: Vec<String>,
+    },
+    Set {
+        writes: BTreeMap<String, String>,
+    },
     TimeStart,
     TimePause,
-    TimeStep { duration: String },
-    TimeSpeed { multiplier: Option<f64> },
+    TimeStep {
+        duration: String,
+    },
+    TimeSpeed {
+        multiplier: Option<f64>,
+    },
     TimeStatus,
+    CanBuses,
+    CanAttach {
+        bus_name: String,
+        vcan_iface: String,
+    },
+    CanDetach {
+        bus_name: String,
+    },
+    CanSend {
+        bus_name: String,
+        arb_id: u32,
+        data_hex: String,
+        flags: Option<u8>,
+    },
     SessionStatus,
     SessionList,
     Close,
@@ -106,6 +130,14 @@ pub enum ResponseData {
     Speed {
         speed: f64,
     },
+    CanBuses {
+        buses: Vec<CanBusData>,
+    },
+    CanSend {
+        bus: String,
+        arb_id: u32,
+        len: u8,
+    },
     WatchSamples {
         samples: Vec<WatchSampleData>,
     },
@@ -162,6 +194,16 @@ pub struct SessionInfoData {
     pub name: String,
     pub socket_path: String,
     pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanBusData {
+    pub id: u32,
+    pub name: String,
+    pub bitrate: u32,
+    pub bitrate_data: u32,
+    pub fd_capable: bool,
+    pub attached_iface: Option<String>,
 }
 
 pub fn parse_duration_us(input: &str) -> Result<u64, ProtocolError> {

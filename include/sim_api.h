@@ -173,6 +173,58 @@ SimStatus sim_get_signals(SimSignalDesc *out, uint32_t capacity,
  */
 SimStatus sim_get_tick_duration_us(uint32_t *out_tick_us);
 
+/**
+ * @brief CAN frame structure for classic CAN and CAN FD.
+ *
+ * Flag bits:
+ *   bit 0: extended frame (29-bit arbitration ID)
+ *   bit 1: FD frame (data may exceed 8 bytes)
+ *   bit 2: BRS (bit rate switch, FD only)
+ *   bit 3: ESI (error state indicator, FD only)
+ *   bit 4: RTR (remote transmission request, classic only)
+ *   bits 5-7: reserved (must be zero)
+ */
+typedef struct {
+  uint32_t arb_id;
+  uint8_t len;
+  uint8_t flags;
+  uint8_t _pad[2];
+  uint8_t data[64];
+} SimCanFrame;
+
+/**
+ * @brief CAN bus descriptor returned by sim_can_get_buses().
+ */
+typedef struct {
+  uint32_t id;
+  const char *name;
+  uint32_t bitrate;
+  uint32_t bitrate_data;
+  uint8_t flags; /* bit 0: FD capable */
+  uint8_t _pad[3];
+} SimCanBusDesc;
+
+/**
+ * @brief Enumerate CAN buses exposed by the DLL.
+ *
+ * Optional export: if any sim_can_* symbol is exported, all must be exported.
+ */
+SimStatus sim_can_get_buses(SimCanBusDesc *out, uint32_t capacity,
+                            uint32_t *out_written);
+
+/**
+ * @brief Deliver received CAN frames to the DLL before sim_tick().
+ */
+SimStatus sim_can_rx(uint32_t bus_id, const SimCanFrame *frames, uint32_t count);
+
+/**
+ * @brief Collect CAN frames queued for TX by the DLL after sim_tick().
+ *
+ * Returns SIM_ERR_BUFFER_TOO_SMALL for partial fills; host should call again.
+ */
+SimStatus sim_can_tx(uint32_t bus_id, SimCanFrame *out, uint32_t capacity,
+                     uint32_t *out_written);
+
 #ifdef __cplusplus
 }
 #endif

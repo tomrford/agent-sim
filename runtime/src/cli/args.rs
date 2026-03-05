@@ -41,6 +41,7 @@ pub enum Command {
     Load { libpath: String },
     Info,
     Signals,
+    Can(CanArgs),
     Reset,
     Get(GetArgs),
     Set(SetArgs),
@@ -55,6 +56,31 @@ pub enum Command {
 pub struct SessionArgs {
     #[command(subcommand)]
     pub command: Option<SessionCommand>,
+}
+
+#[derive(Debug, Args)]
+pub struct CanArgs {
+    #[command(subcommand)]
+    pub command: CanCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CanCommand {
+    Buses,
+    Attach {
+        bus: String,
+        vcan_iface: String,
+    },
+    Detach {
+        bus: String,
+    },
+    Send {
+        bus: String,
+        arb_id: String,
+        data_hex: String,
+        #[arg(long)]
+        flags: Option<u8>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

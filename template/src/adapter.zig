@@ -4,6 +4,8 @@ pub const SimStatus = sim_types.SimStatus;
 pub const SimType = sim_types.SimType;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
+pub const SimCanFrame = sim_types.SimCanFrame;
+pub const SimCanBusDesc = sim_types.SimCanBusDesc;
 
 pub const TickDurationUs: u32 = 20;
 
@@ -15,6 +17,25 @@ pub const Ctx = struct {
 const signals = [_]SimSignalDesc{
     .{ .id = 0, .name = "demo.input", .type = .F32, .units = null },
     .{ .id = 1, .name = "demo.output", .type = .F32, .units = null },
+};
+
+pub const can_buses = [_]SimCanBusDesc{
+    .{
+        .id = 0,
+        .name = "internal",
+        .bitrate = 500_000,
+        .bitrate_data = 0,
+        .flags = 0,
+        ._pad = .{ 0, 0, 0 },
+    },
+    .{
+        .id = 1,
+        .name = "external",
+        .bitrate = 500_000,
+        .bitrate_data = 2_000_000,
+        .flags = 0x01,
+        ._pad = .{ 0, 0, 0 },
+    },
 };
 
 pub fn init(ctx: *Ctx) void {
@@ -59,5 +80,33 @@ pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
     if (id != 0) return .INVALID_SIGNAL;
     if (in.type != .F32) return .TYPE_MISMATCH;
     ctx.input = in.data.f32;
+    return .OK;
+}
+
+pub fn canBusCount() u32 {
+    return can_buses.len;
+}
+
+pub fn fillCanBuses(out: [*]SimCanBusDesc, capacity: u32, out_written: *u32) SimStatus {
+    const n: u32 = @min(capacity, can_buses.len);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) out[i] = can_buses[i];
+    out_written.* = n;
+    return if (capacity < can_buses.len) .BUFFER_TOO_SMALL else .OK;
+}
+
+pub fn canRx(ctx: *Ctx, bus_id: u32, frames: [*]const SimCanFrame, count: u32) void {
+    _ = ctx;
+    _ = bus_id;
+    _ = frames;
+    _ = count;
+}
+
+pub fn canTx(ctx: *Ctx, bus_id: u32, out: [*]SimCanFrame, capacity: u32, out_written: *u32) SimStatus {
+    _ = ctx;
+    _ = bus_id;
+    _ = out;
+    _ = capacity;
+    out_written.* = 0;
     return .OK;
 }

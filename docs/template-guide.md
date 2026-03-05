@@ -31,6 +31,18 @@ Key rules:
 | `src/adapter.zig` | Init/reset/tick logic, signal catalog, read/write map |
 | `project.zig`     | Library name, include paths                           |
 
+## Optional CAN Exports
+
+The template now includes optional CAN hooks:
+
+- `sim_can_get_buses`
+- `sim_can_rx`
+- `sim_can_tx`
+
+By default, `src/adapter.zig` declares two example buses (`internal`, `external`) and
+stub RX/TX handlers. Keep or adapt this pattern if your firmware model needs CAN.
+If you don't need CAN, remove or ignore the bus declarations and keep TX empty.
+
 ## Files to Keep Stable
 
 | File                | Why                                           |

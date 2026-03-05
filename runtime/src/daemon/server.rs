@@ -1,13 +1,17 @@
+use crate::can::CanSocket;
 use crate::protocol::{
-    Action, Request, Response, ResponseData, SessionInfoData, SignalData, SignalValueData,
-    parse_duration_us,
+    Action, CanBusData, Request, Response, ResponseData, SessionInfoData, SignalData,
+    SignalValueData, parse_duration_us,
 };
 use crate::sim::error::SimError;
 use crate::sim::project::Project;
 use crate::sim::time::TimeEngine;
-use crate::sim::types::{SignalType, SignalValue};
+use crate::sim::types::{
+    CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RESERVED_MASK,
+    CAN_FLAG_RTR, SignalType, SignalValue, SimCanBusDesc, SimCanFrame,
+};
 use globset::{Glob, GlobMatcher};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -18,8 +22,14 @@ pub struct DaemonState {
     session: String,
     socket_path: PathBuf,
     project: Project,
+    can_attached: HashMap<String, AttachedCanBus>,
     time: TimeEngine,
     shutdown: bool,
+}
+
+struct AttachedCanBus {
+    meta: SimCanBusDesc,
+    socket: CanSocket,
 }
 
 struct ActionMessage {
@@ -33,6 +43,7 @@ impl DaemonState {
             session,
             socket_path,
             project,
+            can_attached: HashMap::new(),
             time: TimeEngine::default(),
             shutdown: false,
         }
@@ -238,7 +249,10 @@ async fn run_tick_task(
             break;
         }
 
-        let _ = state.time.tick_realtime(&state.project);
+        let due_ticks = state
+            .time
+            .tick_realtime_due(state.project.tick_duration_us());
+        let _ = advance_project_ticks(&mut state, due_ticks);
 
         if state.shutdown {
             break;
@@ -381,8 +395,9 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
             let step = state
                 .time
-                .step(&state.project, duration_us)
+                .step_ticks(state.project.tick_duration_us(), duration_us)
                 .map_err(|e| e.to_string())?;
+            advance_project_ticks(state, step.advanced_ticks).map_err(|e| e.to_string())?;
             Ok(ResponseData::TimeAdvanced {
                 requested_us: step.requested_us,
                 advanced_ticks: step.advanced_ticks,
@@ -409,6 +424,72 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 speed: status.speed,
             })
         }
+        Action::CanBuses => {
+            let buses = state
+                .project
+                .can_buses()
+                .iter()
+                .map(|bus| CanBusData {
+                    id: bus.id,
+                    name: bus.name.clone(),
+                    bitrate: bus.bitrate,
+                    bitrate_data: bus.bitrate_data,
+                    fd_capable: bus.fd_capable,
+                    attached_iface: state
+                        .can_attached
+                        .get(&bus.name)
+                        .map(|attached| attached.socket.iface().to_string()),
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::CanBuses { buses })
+        }
+        Action::CanAttach {
+            bus_name,
+            vcan_iface,
+        } => {
+            if state.can_attached.contains_key(&bus_name) {
+                return Err(format!("CAN bus '{bus_name}' is already attached"));
+            }
+            let meta = find_can_bus_meta(state, &bus_name)?;
+            let socket = CanSocket::open(&vcan_iface, meta.fd_capable)?;
+            state
+                .can_attached
+                .insert(bus_name.clone(), AttachedCanBus { meta, socket });
+            Ok(ResponseData::Ack)
+        }
+        Action::CanDetach { bus_name } => {
+            if state.can_attached.remove(&bus_name).is_none() {
+                return Err(format!("CAN bus '{bus_name}' is not attached"));
+            }
+            Ok(ResponseData::Ack)
+        }
+        Action::CanSend {
+            bus_name,
+            arb_id,
+            data_hex,
+            flags,
+        } => {
+            let attachment = state
+                .can_attached
+                .get(&bus_name)
+                .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
+            let payload = parse_data_hex(&data_hex)?;
+            let mut data = [0_u8; 64];
+            data[..payload.len()].copy_from_slice(&payload);
+            let frame = SimCanFrame {
+                arb_id,
+                len: payload.len() as u8,
+                flags: flags.unwrap_or(0),
+                data,
+            };
+            validate_can_frame(&attachment.meta, &frame)?;
+            attachment.socket.send(&frame)?;
+            Ok(ResponseData::CanSend {
+                bus: bus_name,
+                arb_id,
+                len: frame.len,
+            })
+        }
         Action::SessionStatus => Ok(ResponseData::SessionStatus {
             session: state.session.clone(),
             socket_path: state.socket_path.display().to_string(),
@@ -432,4 +513,159 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             Ok(ResponseData::Ack)
         }
     }
+}
+
+fn advance_project_ticks(state: &mut DaemonState, ticks: u64) -> Result<(), String> {
+    let mut processed = 0_u64;
+    for _ in 0..ticks {
+        if let Err(err) = process_can_rx(state) {
+            state.time.advance_ticks(processed);
+            return Err(err);
+        }
+        if let Err(err) = state.project.tick() {
+            state.time.advance_ticks(processed);
+            return Err(err.to_string());
+        }
+        if let Err(err) = process_can_tx(state) {
+            state.time.advance_ticks(processed.saturating_add(1));
+            return Err(err);
+        }
+        processed = processed.saturating_add(1);
+    }
+    state.time.advance_ticks(processed);
+    Ok(())
+}
+
+fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
+    for (bus_name, attachment) in &mut state.can_attached {
+        let frames = attachment.socket.recv_all()?;
+        if frames.is_empty() {
+            continue;
+        }
+        for frame in &frames {
+            validate_can_frame(&attachment.meta, frame)?;
+        }
+        state
+            .project
+            .can_rx(attachment.meta.id, &frames)
+            .map_err(|e| format!("sim_can_rx failed for bus '{bus_name}': {e}"))?;
+    }
+    Ok(())
+}
+
+fn process_can_tx(state: &mut DaemonState) -> Result<(), String> {
+    for (bus_name, attachment) in &mut state.can_attached {
+        let tx_frames = state
+            .project
+            .can_tx(attachment.meta.id)
+            .map_err(|e| format!("sim_can_tx failed for bus '{bus_name}': {e}"))?;
+        for frame in tx_frames {
+            validate_can_frame(&attachment.meta, &frame)?;
+            attachment.socket.send(&frame)?;
+        }
+    }
+    Ok(())
+}
+
+fn find_can_bus_meta(state: &DaemonState, bus_name: &str) -> Result<SimCanBusDesc, String> {
+    state
+        .project
+        .can_buses()
+        .iter()
+        .find(|bus| bus.name == bus_name)
+        .cloned()
+        .ok_or_else(|| format!("CAN bus '{bus_name}' not declared by loaded project"))
+}
+
+fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
+    let compact = raw
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_')
+        .collect::<String>();
+    if compact.len() % 2 != 0 {
+        return Err(format!(
+            "invalid CAN payload hex '{raw}': expected an even number of hex characters"
+        ));
+    }
+    if compact.len() / 2 > 64 {
+        return Err(format!(
+            "invalid CAN payload hex '{raw}': payload exceeds 64 bytes"
+        ));
+    }
+    let mut payload = Vec::with_capacity(compact.len() / 2);
+    let bytes = compact.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let hi = bytes[idx] as char;
+        let lo = bytes[idx + 1] as char;
+        let pair = format!("{hi}{lo}");
+        let value = u8::from_str_radix(&pair, 16)
+            .map_err(|_| format!("invalid CAN payload hex '{raw}': bad byte '{pair}'"))?;
+        payload.push(value);
+        idx += 2;
+    }
+    Ok(payload)
+}
+
+fn validate_can_frame(bus: &SimCanBusDesc, frame: &SimCanFrame) -> Result<(), String> {
+    if (frame.flags & CAN_FLAG_RESERVED_MASK) != 0 {
+        return Err(format!(
+            "CAN frame for bus '{}' has reserved flag bits set",
+            bus.name
+        ));
+    }
+    if (frame.flags & CAN_FLAG_EXTENDED) != 0 {
+        if frame.arb_id > 0x1FFF_FFFF {
+            return Err(format!(
+                "CAN frame for bus '{}' has invalid extended arbitration id 0x{:X}",
+                bus.name, frame.arb_id
+            ));
+        }
+    } else if frame.arb_id > 0x7FF {
+        return Err(format!(
+            "CAN frame for bus '{}' has invalid standard arbitration id 0x{:X}",
+            bus.name, frame.arb_id
+        ));
+    }
+    if frame.len > 64 {
+        return Err(format!(
+            "CAN frame for bus '{}' has invalid payload length {}",
+            bus.name, frame.len
+        ));
+    }
+
+    let fd_requested = (frame.flags & CAN_FLAG_FD) != 0
+        || frame.len > 8
+        || (frame.flags & (CAN_FLAG_BRS | CAN_FLAG_ESI)) != 0;
+    if fd_requested {
+        if !bus.fd_capable {
+            return Err(format!(
+                "CAN bus '{}' is classic-only and cannot carry FD frames",
+                bus.name
+            ));
+        }
+        if !is_valid_can_fd_length(frame.len) {
+            return Err(format!(
+                "CAN FD frame for bus '{}' has invalid length {}; valid lengths are 0-8,12,16,20,24,32,48,64",
+                bus.name, frame.len
+            ));
+        }
+        if (frame.flags & CAN_FLAG_RTR) != 0 {
+            return Err(format!(
+                "CAN FD frame for bus '{}' cannot set RTR flag",
+                bus.name
+            ));
+        }
+    } else if frame.len > 8 {
+        return Err(format!(
+            "classic CAN frame for bus '{}' has invalid length {}",
+            bus.name, frame.len
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_valid_can_fd_length(len: u8) -> bool {
+    matches!(len, 0..=8 | 12 | 16 | 20 | 24 | 32 | 48 | 64)
 }

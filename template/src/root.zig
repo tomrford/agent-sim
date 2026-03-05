@@ -5,6 +5,8 @@ const sim_types = @import("sim_types.zig");
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
+pub const SimCanFrame = sim_types.SimCanFrame;
+pub const SimCanBusDesc = sim_types.SimCanBusDesc;
 
 var g_ctx: adapter.Ctx = .{};
 var g_initialized = false;
@@ -65,6 +67,35 @@ pub export fn sim_get_tick_duration_us(out_tick_us: ?*u32) SimStatus {
     const out = out_tick_us orelse return .INVALID_ARG;
     out.* = adapter.TickDurationUs;
     return .OK;
+}
+
+pub export fn sim_can_get_buses(out: ?[*]SimCanBusDesc, capacity: u32, out_written: ?*u32) SimStatus {
+    const written = out_written orelse return .INVALID_ARG;
+    if (capacity > 0 and out == null) return .INVALID_ARG;
+    if (capacity == 0) {
+        written.* = 0;
+        return if (adapter.canBusCount() == 0) .OK else .BUFFER_TOO_SMALL;
+    }
+    return adapter.fillCanBuses(out.?, capacity, written);
+}
+
+pub export fn sim_can_rx(bus_id: u32, frames: ?[*]const SimCanFrame, count: u32) SimStatus {
+    const ctx = requireInitialized() orelse return .NOT_INITIALIZED;
+    if (count > 0 and frames == null) return .INVALID_ARG;
+    if (count == 0) return .OK;
+    adapter.canRx(ctx, bus_id, frames.?, count);
+    return .OK;
+}
+
+pub export fn sim_can_tx(bus_id: u32, out: ?[*]SimCanFrame, capacity: u32, out_written: ?*u32) SimStatus {
+    const ctx = requireInitialized() orelse return .NOT_INITIALIZED;
+    const written = out_written orelse return .INVALID_ARG;
+    if (capacity > 0 and out == null) return .INVALID_ARG;
+    if (capacity == 0) {
+        written.* = 0;
+        return .OK;
+    }
+    return adapter.canTx(ctx, bus_id, out.?, capacity, written);
 }
 
 test "template sanity" {

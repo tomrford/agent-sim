@@ -111,6 +111,37 @@ pub fn print_response(response: &Response, json_mode: bool) {
             );
         }
         Some(ResponseData::Speed { speed }) => println!("{speed}"),
+        Some(ResponseData::CanBuses { buses }) => {
+            let mut table = Table::new();
+            table.load_preset(UTF8_HORIZONTAL_ONLY).set_header(vec![
+                "ID",
+                "Bus",
+                "Bitrate",
+                "Data Bitrate",
+                "FD",
+                "Attached",
+            ]);
+            for bus in buses {
+                table.add_row(vec![
+                    bus.id.to_string(),
+                    bus.name.clone(),
+                    bus.bitrate.to_string(),
+                    if bus.bitrate_data == 0 {
+                        "-".to_string()
+                    } else {
+                        bus.bitrate_data.to_string()
+                    },
+                    bus.fd_capable.to_string(),
+                    bus.attached_iface
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
+        }
+        Some(ResponseData::CanSend { bus, arb_id, len }) => {
+            println!("Sent frame on {bus}: id=0x{arb_id:X} len={len}");
+        }
         Some(ResponseData::WatchSamples { samples }) => {
             for sample in samples {
                 println!(

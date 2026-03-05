@@ -9,6 +9,10 @@ pub enum ProjectError {
     MissingSymbol(&'static str),
     #[error("invalid signal metadata from project")]
     InvalidSignalMetadata,
+    #[error("invalid CAN exports: {0}")]
+    InvalidCanExports(String),
+    #[error("invalid CAN metadata from project")]
+    InvalidCanMetadata,
 }
 
 #[derive(Debug, Error)]
