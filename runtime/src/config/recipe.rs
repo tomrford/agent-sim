@@ -12,15 +12,26 @@ pub struct DefaultsConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct LoadDefaults {
     pub lib: Option<String>,
+    #[serde(default)]
+    pub flash: Vec<FlashBlockDef>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct FileConfig {
     pub defaults: Option<DefaultsConfig>,
     #[serde(default)]
+    pub device: BTreeMap<String, DeviceDef>,
+    #[serde(default)]
     pub recipe: BTreeMap<String, RecipeDef>,
     #[serde(default)]
     pub env: BTreeMap<String, EnvDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceDef {
+    pub lib: String,
+    #[serde(default)]
+    pub flash: Vec<FlashBlockDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,8 +40,8 @@ pub struct RecipeDef {
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
-    pub sessions: Vec<String>,
-    pub session: Option<String>,
+    pub instances: Vec<String>,
+    pub instance: Option<String>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -56,14 +67,14 @@ pub enum StepSpec {
     Duration(String),
     Detailed {
         duration: String,
-        session: Option<String>,
+        instance: Option<String>,
     },
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssertSpec {
     pub signal: String,
-    pub session: Option<String>,
+    pub instance: Option<String>,
     pub eq: Option<toml::Value>,
     pub gt: Option<f64>,
     pub lt: Option<f64>,
@@ -76,7 +87,7 @@ pub struct AssertSpec {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvDef {
     #[serde(default)]
-    pub sessions: Vec<EnvSession>,
+    pub instances: Vec<EnvInstance>,
     #[serde(default)]
     pub can: BTreeMap<String, EnvCanBus>,
     #[serde(default)]
@@ -85,9 +96,28 @@ pub struct EnvDef {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvSession {
+pub struct EnvInstance {
     pub name: String,
-    pub lib: String,
+    pub lib: Option<String>,
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlashFileBlockDef {
+    pub file: String,
+    pub format: Option<String>,
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum FlashBlockDef {
+    File(FlashFileBlockDef),
+    InlineU32 { u32: u32, addr: String },
+    InlineI32 { i32: i32, addr: String },
+    InlineF32 { f32: f32, addr: String },
+    InlineBool { bool: bool, addr: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,30 +144,30 @@ pub struct ResetSpec {}
 pub enum RecipeStep {
     Set {
         set: BTreeMap<String, toml::Value>,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Step {
         step: StepSpec,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Print {
         print: PrintSpec,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Speed {
         speed: f64,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Reset {
         reset: ResetSpec,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Sleep {
         sleep: u64,
     },
     For {
         r#for: ForSpec,
-        session: Option<String>,
+        instance: Option<String>,
     },
     Assert {
         assert: AssertSpec,

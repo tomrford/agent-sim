@@ -1,9 +1,11 @@
 mod common;
 
 use common::{ensure_fixtures_built, run_agent, run_agent_fail, template_lib_path, unique_session};
+use serial_test::serial;
 use std::io::Write;
 
 #[test]
+#[serial]
 fn env_start_and_close_by_env_tag() {
     ensure_fixtures_built();
     let session_a = unique_session("env-a");
@@ -20,7 +22,7 @@ fn env_start_and_close_by_env_tag() {
         cfg,
         r#"
 [env.{env_name}]
-sessions = [
+instances = [
   {{ name = "{session_a}", lib = "{libpath}" }},
   {{ name = "{session_b}", lib = "{libpath}" }},
 ]
@@ -30,10 +32,10 @@ sessions = [
     let cfg_path = cfg.path().display().to_string();
 
     let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
-    let status_a = run_agent(&["--session", &session_a, "session"]);
+    let status_a = run_agent(&["--instance", &session_a, "instance"]);
     assert!(
         status_a.contains("Running: true"),
-        "unexpected session output: {status_a}"
+        "unexpected instance output: {status_a}"
     );
     assert!(
         status_a.contains(&env_name),
@@ -41,14 +43,15 @@ sessions = [
     );
 
     let _ = run_agent(&["close", "--env", &env_name]);
-    let err = run_agent_fail(&["--session", &session_a, "info"]);
+    let err = run_agent_fail(&["--instance", &session_a, "info"]);
     assert!(
         err.contains("run `agent-sim load <libpath>` first"),
-        "expected stopped session after close --env, got: {err}"
+        "expected stopped instance after close --env, got: {err}"
     );
 }
 
 #[test]
+#[serial]
 fn close_all_closes_every_running_session() {
     ensure_fixtures_built();
     let session_a = unique_session("close-all-a");
@@ -59,18 +62,19 @@ fn close_all_closes_every_running_session() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session_a, "load", &libpath]);
-    let _ = run_agent(&["--session", &session_b, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session_a, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session_b, "load", &libpath]);
 
     let _ = run_agent(&["close", "--all"]);
 
-    let err_a = run_agent_fail(&["--session", &session_a, "info"]);
-    let err_b = run_agent_fail(&["--session", &session_b, "info"]);
+    let err_a = run_agent_fail(&["--instance", &session_a, "info"]);
+    let err_b = run_agent_fail(&["--instance", &session_b, "info"]);
     assert!(err_a.contains("run `agent-sim load <libpath>` first"));
     assert!(err_b.contains("run `agent-sim load <libpath>` first"));
 }
 
 #[test]
+#[serial]
 fn env_start_rejects_unknown_session_fields() {
     ensure_fixtures_built();
     let session = unique_session("env-init");
@@ -86,7 +90,7 @@ fn env_start_rejects_unknown_session_fields() {
         cfg,
         r#"
 [env.{env_name}]
-sessions = [
+instances = [
   {{ name = "{session}", lib = "{libpath}", init = {{ "demo.input" = 4.5 }} }},
 ]
 "#
@@ -100,6 +104,7 @@ sessions = [
 }
 
 #[test]
+#[serial]
 fn env_start_resolves_session_lib_relative_to_config_dir() {
     ensure_fixtures_built();
     let session = unique_session("env-relative-lib");
@@ -123,7 +128,7 @@ fn env_start_resolves_session_lib_relative_to_config_dir() {
         format!(
             r#"
 [env.{env_name}]
-sessions = [
+instances = [
   {{ name = "{session}", lib = "./libs/{libname}" }},
 ]
 "#
@@ -133,10 +138,10 @@ sessions = [
     let cfg_path = cfg_path.display().to_string();
 
     let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
-    let status = run_agent(&["--session", &session, "session"]);
+    let status = run_agent(&["--instance", &session, "instance"]);
     assert!(
         status.contains("Running: true"),
-        "unexpected session output: {status}"
+        "unexpected instance output: {status}"
     );
 
     let _ = run_agent(&["close", "--env", &env_name]);

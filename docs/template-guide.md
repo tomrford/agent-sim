@@ -24,6 +24,26 @@ Key rules:
 - Signal IDs/types are discovered at runtime — never hardcode across builds.
 - Use `sim_get_tick_duration_us` for the tick quantum; don't assume a fixed value.
 
+## Optional Flash Export
+
+The template now includes an optional flash preload hook:
+
+- `sim_flash_write`
+
+The runtime calls `sim_flash_write(base_addr, data, len)` before `sim_init()` when
+flash regions are configured from CLI or TOML.
+
+### Flash-preserving init/reset rule
+
+Treat flash as non-volatile state:
+
+- `sim_flash_write` updates non-volatile storage
+- `sim_init` should reset volatile runtime state only
+- `sim_reset` should reset volatile runtime state only
+
+Do **not** zero the whole context inside `sim_init` or `sim_reset` after adding
+flash-backed storage, or you'll erase flashed data on boot/reset.
+
 ## Files to Edit
 
 | File              | What to change                                        |
@@ -52,7 +72,7 @@ The template also includes optional shared-state hooks:
 - `sim_shared_write`
 
 The default adapter exposes one channel (`sensor_feed`) with two slots to
-demonstrate snapshot-style sharing between sessions.
+demonstrate snapshot-style sharing between instances.
 
 ## Files to Keep Stable
 
@@ -70,9 +90,10 @@ Set `pub const TickDurationUs` in `adapter.zig`. The runtime reads this via `sim
 
 1. `dlopen` + bind symbols
 2. Query tick duration + signal catalog
-3. Initialize state (`sim_init`)
-4. Per step: write inputs → `sim_tick` → read outputs
-5. `dlclose`
+3. Optional flash preload (`sim_flash_write`)
+4. Initialize state (`sim_init`)
+5. Per step: write inputs → `sim_tick` → read outputs
+6. `dlclose`
 
 ## Example
 

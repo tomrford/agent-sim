@@ -29,10 +29,10 @@ steps = [
     .expect("temp config should be writable");
     let config = temp.path().display().to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
 
     let dry_run = run_agent(&[
-        "--session",
+        "--instance",
         &session,
         "--config",
         &config,
@@ -43,7 +43,7 @@ steps = [
     assert!(dry_run.contains("Dry run: true"));
 
     let run = run_agent(&[
-        "--session",
+        "--instance",
         &session,
         "--config",
         &config,
@@ -52,11 +52,11 @@ steps = [
     ]);
     assert!(run.contains("Steps: 3"));
 
-    let output = run_agent(&["--session", &session, "get", "demo.output"]);
+    let output = run_agent(&["--instance", &session, "get", "demo.output"]);
     assert!(
         output.contains("7"),
         "recipe should produce doubled output, got: {output}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

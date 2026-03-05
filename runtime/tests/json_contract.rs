@@ -12,14 +12,14 @@ fn json_output_contract_and_watch_ndjson() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let load_json = run_agent(&["--json", "--session", &session, "load", &libpath]);
+    let load_json = run_agent(&["--json", "--instance", &session, "load", &libpath]);
     let load_value: serde_json::Value =
         serde_json::from_str(load_json.trim()).expect("load output should be valid json object");
     assert_eq!(load_value["success"], serde_json::Value::Bool(true));
 
     let watch = run_agent(&[
         "--json",
-        "--session",
+        "--instance",
         &session,
         "watch",
         "demo.output",
@@ -37,5 +37,5 @@ fn json_output_contract_and_watch_ndjson() {
         assert!(row.get("value").is_some());
     }
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

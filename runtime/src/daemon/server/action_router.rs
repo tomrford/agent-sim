@@ -1,14 +1,11 @@
 use super::DaemonState;
 use super::{can_ops, shared_ops};
-use crate::can::CanSocket;
-use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
-    Action, CanBusData, ResponseData, SessionInfoData, SharedChannelData, SharedSlotValueData,
-    SignalData, SignalValueData, parse_duration_us,
+    Action, CanBusData, CanBusFramesData, InstanceInfoData, ResponseData, SharedChannelData,
+    SharedSlotValueData, SignalData, SignalValueData, parse_duration_us,
 };
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
-use crate::sim::types::SimCanFrame;
 use std::path::Path;
 
 pub(super) async fn dispatch_action(
@@ -17,11 +14,11 @@ pub(super) async fn dispatch_action(
 ) -> Result<ResponseData, String> {
     match action {
         Action::Ping => Ok(ResponseData::Ack),
-        Action::Load { libpath, .. } => {
+        Action::Load { load_spec } => {
             let bound = state.project.libpath.display().to_string();
-            if libpath != bound {
+            if load_spec.libpath != bound {
                 return Err(format!(
-                    "daemon already bound to '{bound}'; start a new session for a different DLL"
+                    "daemon already bound to '{bound}'; start a new instance for a different DLL"
                 ));
             }
             Ok(ResponseData::Loaded {
@@ -70,9 +67,7 @@ pub(super) async fn dispatch_action(
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
                 if selector.starts_with("can.") {
-                    can_ops::write_can_signal(state, &selector, &raw_value)?;
-                    applied += 1;
-                    continue;
+                    return Err(can_signal_projection_error());
                 }
 
                 let ids =
@@ -97,6 +92,7 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimeStart => {
+            reject_local_time_control(state)?;
             state.time.start().map_err(|e| e.to_string())?;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
@@ -107,6 +103,7 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimePause => {
+            reject_local_time_control(state)?;
             state.time.pause().map_err(|e| e.to_string())?;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
@@ -117,6 +114,7 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimeStep { duration } => {
+            reject_local_time_control(state)?;
             let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
             let step = state
                 .time
@@ -130,6 +128,7 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimeSpeed { multiplier } => {
+            reject_local_time_control(state)?;
             if let Some(multiplier) = multiplier {
                 state
                     .time
@@ -141,6 +140,7 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimeStatus => {
+            reject_local_time_control(state)?;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
@@ -149,7 +149,7 @@ pub(super) async fn dispatch_action(
                 speed: status.speed,
             })
         }
-        Action::CanBuses => {
+        Action::WorkerCanBuses => {
             let buses = state
                 .project
                 .can_buses()
@@ -160,45 +160,51 @@ pub(super) async fn dispatch_action(
                     bitrate: bus.bitrate,
                     bitrate_data: bus.bitrate_data,
                     fd_capable: bus.fd_capable,
-                    attached_iface: state
-                        .can_attached
-                        .get(&bus.name)
-                        .map(|attached| attached.socket.iface().to_string()),
+                    attached_iface: None,
                 })
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanBuses { buses })
         }
-        Action::CanAttach {
-            bus_name,
-            vcan_iface,
-        } => {
-            if state.can_attached.contains_key(&bus_name) {
-                return Err(format!("CAN bus '{bus_name}' is already attached"));
+        Action::WorkerStep { can_rx } => {
+            for batch in &can_rx {
+                let meta = can_ops::find_can_bus_meta(state, &batch.bus_name)?;
+                let frames = batch
+                    .frames
+                    .iter()
+                    .cloned()
+                    .map(crate::sim::types::SimCanFrame::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                for frame in &frames {
+                    can_ops::validate_can_frame(&meta, frame)?;
+                }
+                state
+                    .project
+                    .can_rx(meta.id, &frames)
+                    .map_err(|e| format!("sim_can_rx failed for bus '{}': {e}", batch.bus_name))?;
             }
-            let meta = can_ops::find_can_bus_meta(state, &bus_name)?;
-            let socket = CanSocket::open(&vcan_iface, meta.fd_capable)?;
-            state
-                .can_attached
-                .insert(bus_name.clone(), super::AttachedCanBus { meta, socket });
-            Ok(ResponseData::Ack)
-        }
-        Action::CanDetach { bus_name } => {
-            if state.can_attached.remove(&bus_name).is_none() {
-                return Err(format!("CAN bus '{bus_name}' is not attached"));
+            shared_ops::process_shared_rx(state)?;
+            state.project.tick().map_err(|e| e.to_string())?;
+            let mut can_tx = Vec::new();
+            for bus in state.project.can_buses() {
+                let frames = state
+                    .project
+                    .can_tx(bus.id)
+                    .map_err(|e| format!("sim_can_tx failed for bus '{}': {e}", bus.name))?;
+                if !frames.is_empty() {
+                    can_tx.push(CanBusFramesData {
+                        bus_name: bus.name.clone(),
+                        frames: frames.iter().map(Into::into).collect(),
+                    });
+                }
             }
-            Ok(ResponseData::Ack)
+            shared_ops::process_shared_tx(state)?;
+            state.time.advance_ticks(1);
+            Ok(ResponseData::WorkerStep { can_tx })
         }
-        Action::CanLoadDbc { bus_name, path } => {
-            let _ = can_ops::find_can_bus_meta(state, &bus_name)?;
-            can_ops::ensure_absolute_path(&path, "DBC")?;
-            let overlay = DbcBusOverlay::load(Path::new(&path))?;
-            let signal_count = overlay.signal_names().count();
-            state.dbc_overlays.insert(bus_name.clone(), overlay);
-            Ok(ResponseData::DbcLoaded {
-                bus: bus_name,
-                signal_count,
-            })
-        }
+        Action::CanBuses => Err(local_can_control_error()),
+        Action::CanAttach { .. } => Err(local_can_control_error()),
+        Action::CanDetach { .. } => Err(local_can_control_error()),
+        Action::CanLoadDbc { .. } => Err(local_can_control_error()),
         Action::SharedList => {
             let channels = state
                 .project
@@ -261,58 +267,48 @@ pub(super) async fn dispatch_action(
                 slots,
             })
         }
-        Action::CanSend {
-            bus_name,
-            arb_id,
-            data_hex,
-            flags,
-        } => {
-            let attachment = state
-                .can_attached
-                .get(&bus_name)
-                .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
-            let payload = can_ops::parse_data_hex(&data_hex)?;
-            let mut data = [0_u8; 64];
-            data[..payload.len()].copy_from_slice(&payload);
-            let frame = SimCanFrame {
-                arb_id,
-                len: payload.len() as u8,
-                flags: flags.unwrap_or(0),
-                data,
-            };
-            can_ops::validate_can_frame(&attachment.meta, &frame)?;
-            attachment.socket.send(&frame)?;
-            can_ops::record_frame(state, &bus_name, &frame);
-            Ok(ResponseData::CanSend {
-                bus: bus_name,
-                arb_id,
-                len: frame.len,
-            })
-        }
-        Action::SessionStatus => Ok(ResponseData::SessionStatus {
-            session: state.session.clone(),
+        Action::CanSend { .. } => Err(local_can_control_error()),
+        Action::InstanceStatus => Ok(ResponseData::InstanceStatus {
+            instance: state.session.clone(),
             socket_path: state.socket_path.display().to_string(),
             running: true,
             env: state.env.clone(),
         }),
-        Action::SessionList => {
-            let sessions = crate::daemon::lifecycle::list_sessions()
+        Action::InstanceList => {
+            let instances = crate::daemon::lifecycle::list_sessions()
                 .await
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|(name, socket_path, running, env)| SessionInfoData {
+                .map(|(name, socket_path, running, env)| InstanceInfoData {
                     name,
                     socket_path: socket_path.display().to_string(),
                     running,
                     env,
                 })
                 .collect::<Vec<_>>();
-            Ok(ResponseData::SessionList { sessions })
+            Ok(ResponseData::InstanceList { instances })
         }
         Action::Close => {
             state.shutdown = true;
             Ok(ResponseData::Ack)
         }
+        Action::EnvStatus { .. }
+        | Action::EnvReset { .. }
+        | Action::EnvTimeStart { .. }
+        | Action::EnvTimePause { .. }
+        | Action::EnvTimeStep { .. }
+        | Action::EnvTimeSpeed { .. }
+        | Action::EnvTimeStatus { .. }
+        | Action::EnvCanBuses { .. }
+        | Action::EnvCanLoadDbc { .. }
+        | Action::EnvCanSend { .. }
+        | Action::EnvCanInspect { .. }
+        | Action::EnvCanScheduleAdd { .. }
+        | Action::EnvCanScheduleUpdate { .. }
+        | Action::EnvCanScheduleRemove { .. }
+        | Action::EnvCanScheduleStop { .. }
+        | Action::EnvCanScheduleList { .. }
+        | Action::EnvClose { .. } => Err("env-owned action sent to instance daemon".to_string()),
     }
 }
 
@@ -321,18 +317,12 @@ fn read_selected_signal_values(
     selectors: Vec<String>,
 ) -> Result<Vec<SignalValueData>, String> {
     let mut values = Vec::new();
-    let mut native_selectors = Vec::new();
 
     for selector in selectors {
         if selector.starts_with("can.") {
-            values.extend(can_ops::get_can_signal_values(state, &selector)?);
-        } else {
-            native_selectors.push(selector);
+            return Err(can_signal_projection_error());
         }
-    }
-
-    if !native_selectors.is_empty() {
-        let ids = DaemonState::select_signal_ids(&state.project, &native_selectors)
+        let ids = DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
             .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
         for id in ids {
             let signal = state
@@ -380,4 +370,22 @@ fn advance_project_ticks_for_request(state: &mut DaemonState, ticks: u64) -> Res
     }
     state.time.advance_ticks(processed);
     Ok(())
+}
+
+fn reject_local_time_control(state: &DaemonState) -> Result<(), String> {
+    if let Some(env_name) = &state.env {
+        return Err(format!(
+            "instance-local time control is unavailable while attached to env '{env_name}'; use `agent-sim env time {env_name} ...` instead"
+        ));
+    }
+    Ok(())
+}
+
+fn local_can_control_error() -> String {
+    "CAN is env-owned; use `agent-sim env can <env> ...` instead".to_string()
+}
+
+fn can_signal_projection_error() -> String {
+    "CAN signal projection is no longer supported; use `agent-sim env can <env> ...` instead"
+        .to_string()
 }

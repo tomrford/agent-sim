@@ -13,13 +13,13 @@ fn shared_list_reports_channels_from_loaded_project() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let out = run_agent(&["--session", &session, "shared", "list"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let out = run_agent(&["--instance", &session, "shared", "list"]);
     assert!(
         out.contains("Channel"),
         "expected shared channel table output, got: {out}"
     );
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn shared_get_reads_latest_snapshot_from_writer_session() {
         cfg,
         r#"
 [env.{env_name}]
-sessions = [
+instances = [
   {{ name = "{writer_session}", lib = "{libpath}" }},
   {{ name = "{reader_session}", lib = "{libpath}" }},
 ]
@@ -52,11 +52,11 @@ writer = "{writer_session}"
     let cfg_path = cfg.path().display().to_string();
 
     let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
-    let _ = run_agent(&["--session", &writer_session, "set", "demo.input", "3.0"]);
-    let _ = run_agent(&["--session", &writer_session, "time", "step", "20us"]);
+    let _ = run_agent(&["--instance", &writer_session, "set", "demo.input", "3.0"]);
+    let _ = run_agent(&["env", "time", &env_name, "step", "20us"]);
 
     let shared = run_agent(&[
-        "--session",
+        "--instance",
         &reader_session,
         "shared",
         "get",

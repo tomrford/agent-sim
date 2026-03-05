@@ -29,10 +29,10 @@ agent-sim close
 ## Architecture
 
 ```
-CLI client  ◄── JSON lines over Unix socket ──►  Daemon (same binary, --daemon)
-                                                   ├─ Project (dlopen DLL, sim_api.h ABI)
-                                                   │  └─ Device state (singleton, in-process)
-                                                   └─ Time Engine (tick loop)
+CLI client  ◄── JSON lines over Unix sockets ──►  Env daemon (optional, env-owned time/CAN)
+                                                   ├─ Instance daemons
+                                                   │  └─ Project (dlopen DLL, sim_api.h ABI)
+                                                   └─ Env-owned CAN manager / logical time
 ```
 
 Single binary. No external runtime dependencies. Cross-platform (Linux, macOS, Windows).
@@ -44,13 +44,15 @@ Single binary. No external runtime dependencies. Cross-platform (Linux, macOS, W
 | **Project**  | Loaded shared library (`.so`/`.dylib`/`.dll`) implementing `sim_api.h`       |
 | **Signal**   | Named, typed value exposed by the project. Address by name, `#id`, or glob   |
 | **Tick**     | One simulation quantum. Duration from `sim_get_tick_duration_us()`           |
-| **Session**  | Isolated daemon process with its own socket, one bound project, time engine  |
+| **Device**   | Reusable library + optional flash preload definition                          |
+| **Instance** | Running simulated instance of a device                                        |
+| **Env**      | Coordinated collection of instances with env-owned time and CAN              |
 | **Recipe**   | Named command sequence in `agent-sim.toml`                                   |
 
 ## Commands
 
 ```
-agent-sim load <libpath>              # Start session daemon bound to DLL
+agent-sim load [libpath]              # Start instance daemon bound to DLL
 agent-sim info                        # Project metadata
 agent-sim signals                     # List all signals
 agent-sim reset                       # Reset device state to deterministic startup
@@ -61,14 +63,27 @@ agent-sim watch <signal> [ms]         # Stream signal values
 
 agent-sim time start|pause|step|speed|status
 
+agent-sim env start <name>
+agent-sim env status <name>
+agent-sim env reset <name>
+agent-sim env time <name> start|pause|step|speed|status
+agent-sim env can <name> buses|inspect|send|load-dbc|schedule ...
+
 agent-sim run <recipe>                # Execute recipe from config
-agent-sim session [list]              # Session info
+agent-sim instance [list]             # Instance info
 agent-sim close                       # Shut down daemon
 ```
 
-Global flags: `--json`, `--session <name>`, `--config <path>`.
+Global flags: `--json`, `--instance <name>`, `--config <path>`.
 
-`load` is a bootstrap command: one session daemon is permanently bound to one DLL for its lifetime. To run a different DLL or a second device, use a different `--session`.
+`load` is a bootstrap command: one instance daemon is permanently bound to one DLL for its lifetime. To run a different DLL or a second device, use a different `--instance`.
+
+Flash preloads are part of load/device startup:
+
+```sh
+agent-sim load ./zig-out/lib/libsim_example.so --flash ./cal.hex
+agent-sim load ./zig-out/lib/libsim_example.so --flash ./blob.bin:0x08040000
+```
 
 ## Configuration
 
@@ -79,7 +94,7 @@ First-match priority:
 3. `./agent-sim.toml` in working directory
 4. Empty defaults
 
-See `examples/hvac/agent-sim.toml` for a complete recipe reference.
+See `examples/hvac/agent-sim.toml` for device/env/recipe examples.
 
 ## Creating a DLL
 

@@ -14,15 +14,15 @@ fn recipe_level_session_default_targets_specified_session() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session_a, "load", &libpath]);
-    let _ = run_agent(&["--session", &session_b, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session_a, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session_b, "load", &libpath]);
 
     let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
     write!(
         cfg,
         r#"
 [recipe.to-b]
-session = "{session_b}"
+instance = "{session_b}"
 steps = [
   {{ set = {{ "demo.input" = 4.0 }} }},
   {{ step = "20us" }},
@@ -33,7 +33,7 @@ steps = [
     let cfg_path = cfg.path().display().to_string();
 
     let _ = run_agent(&[
-        "--session",
+        "--instance",
         &session_a,
         "--config",
         &cfg_path,
@@ -41,20 +41,20 @@ steps = [
         "to-b",
     ]);
 
-    let out_b = run_agent(&["--session", &session_b, "get", "demo.output"]);
+    let out_b = run_agent(&["--instance", &session_b, "get", "demo.output"]);
     assert!(
         out_b.contains("8"),
-        "expected session B to be updated, got: {out_b}"
+        "expected instance B to be updated, got: {out_b}"
     );
 
-    let out_a = run_agent(&["--session", &session_a, "get", "demo.output"]);
+    let out_a = run_agent(&["--instance", &session_a, "get", "demo.output"]);
     assert!(
         out_a.contains("0"),
-        "expected session A to remain unchanged, got: {out_a}"
+        "expected instance A to remain unchanged, got: {out_a}"
     );
 
-    let _ = run_agent(&["--session", &session_a, "close"]);
-    let _ = run_agent(&["--session", &session_b, "close"]);
+    let _ = run_agent(&["--instance", &session_a, "close"]);
+    let _ = run_agent(&["--instance", &session_b, "close"]);
 }
 
 #[test]
@@ -68,14 +68,14 @@ fn recipe_session_preconditions_must_be_running() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session_a, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session_a, "load", &libpath]);
 
     let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
     write!(
         cfg,
         r#"
 [recipe.requires]
-sessions = ["{session_missing}"]
+instances = ["{session_missing}"]
 steps = [{{ step = "20us" }}]
 "#
     )
@@ -83,7 +83,7 @@ steps = [{{ step = "20us" }}]
     let cfg_path = cfg.path().display().to_string();
 
     let err = run_agent_fail(&[
-        "--session",
+        "--instance",
         &session_a,
         "--config",
         &cfg_path,
@@ -92,10 +92,10 @@ steps = [{{ step = "20us" }}]
     ]);
     assert!(
         err.contains(&session_missing),
-        "expected missing-session precondition error, got: {err}"
+        "expected missing-instance precondition error, got: {err}"
     );
 
-    let _ = run_agent(&["--session", &session_a, "close"]);
+    let _ = run_agent(&["--instance", &session_a, "close"]);
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn recipe_env_whitelist_requires_target_session_env() {
         cfg,
         r#"
 [env.{env_name}]
-sessions = [
+instances = [
   {{ name = "{session}", lib = "{libpath}" }},
 ]
 
@@ -133,7 +133,7 @@ steps = [{{ step = "20us" }}]
 
     let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
     let _ = run_agent(&[
-        "--session",
+        "--instance",
         &session,
         "--config",
         &cfg_path,
@@ -142,7 +142,7 @@ steps = [{{ step = "20us" }}]
     ]);
 
     let err = run_agent_fail(&[
-        "--session",
+        "--instance",
         &session,
         "--config",
         &cfg_path,
@@ -169,7 +169,7 @@ fn recipe_env_whitelist_rejects_sessions_without_env() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
 
     let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
     write!(
@@ -184,7 +184,7 @@ steps = [{{ step = "20us" }}]
     let cfg_path = cfg.path().display().to_string();
 
     let err = run_agent_fail(&[
-        "--session",
+        "--instance",
         &session,
         "--config",
         &cfg_path,
@@ -196,5 +196,5 @@ steps = [{{ step = "20us" }}]
         "unexpected error: {err}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

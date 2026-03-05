@@ -6,9 +6,9 @@ pub enum DaemonError {
     StartupTimeout,
     #[error("daemon startup failed: {0}")]
     StartupFailed(String),
-    #[error("session '{0}' already has a running daemon")]
+    #[error("instance '{0}' already has a running daemon")]
     AlreadyRunning(String),
-    #[error("session '{0}' has no running daemon; run `agent-sim load <libpath>` first")]
+    #[error("instance '{0}' has no running daemon; run `agent-sim load <libpath>` first")]
     NotRunning(String),
     #[error("daemon request failed: {0}")]
     Request(String),

@@ -15,36 +15,36 @@ fn load_info_and_reset_workflow() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let load_out = run_agent(&["--session", &session, "load", &libpath]);
+    let load_out = run_agent(&["--instance", &session, "load", &libpath]);
     assert!(load_out.contains("Loaded:"));
 
-    let info_out = run_agent(&["--session", &session, "info"]);
+    let info_out = run_agent(&["--instance", &session, "info"]);
     assert!(info_out.contains("Loaded: true"));
-    assert!(info_out.contains("Signals: 2"));
+    assert!(info_out.contains("Signals: 3"));
 
-    let _ = run_agent(&["--session", &session, "set", "demo.input", "4.0"]);
-    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
-    let value_before_reset = run_agent(&["--session", &session, "get", "demo.output"]);
+    let _ = run_agent(&["--instance", &session, "set", "demo.input", "4.0"]);
+    let _ = run_agent(&["--instance", &session, "time", "step", "20us"]);
+    let value_before_reset = run_agent(&["--instance", &session, "get", "demo.output"]);
     assert!(value_before_reset.contains("8"));
 
-    let _ = run_agent(&["--session", &session, "reset"]);
-    let value_after_reset = run_agent(&["--session", &session, "get", "demo.output"]);
+    let _ = run_agent(&["--instance", &session, "reset"]);
+    let value_after_reset = run_agent(&["--instance", &session, "get", "demo.output"]);
     assert!(value_after_reset.contains("0"));
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
 fn load_invalid_library_path_returns_error() {
     let session = unique_session("project-invalid-path");
     let err = run_agent_fail(&[
-        "--session",
+        "--instance",
         &session,
         "load",
         "/tmp/this-library-does-not-exist.so",
     ]);
     assert!(
-        err.contains("library load failed"),
+        err.contains("failed to resolve shared library path"),
         "expected load error for invalid library path, got: {err}"
     );
 }
@@ -59,14 +59,14 @@ fn second_load_same_session_is_rejected() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let err = run_agent_fail(&["--session", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let err = run_agent_fail(&["--instance", &session, "load", &libpath]);
     assert!(
         err.contains("already has a running daemon"),
         "expected singleton daemon load rejection, got: {err}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -79,11 +79,11 @@ fn hvac_signal_catalog_contains_expected_names() {
         .expect("hvac path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let signals = run_agent(&["--session", &session, "signals"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let signals = run_agent(&["--instance", &session, "signals"]);
     assert!(signals.contains("hvac.power"));
     assert!(signals.contains("hvac.state"));
     assert!(signals.contains("hvac.current_temp"));
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

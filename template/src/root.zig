@@ -19,7 +19,6 @@ fn requireInitialized() ?*adapter.Ctx {
 }
 
 pub export fn sim_init() SimStatus {
-    g_ctx = .{};
     const status = adapter.init(&g_ctx);
     if (status == .OK) g_initialized = true;
     return status;
@@ -69,6 +68,12 @@ pub export fn sim_get_tick_duration_us(out_tick_us: ?*u32) SimStatus {
     const out = out_tick_us orelse return .INVALID_ARG;
     out.* = adapter.TickDurationUs;
     return .OK;
+}
+
+pub export fn sim_flash_write(base_addr: u32, data: ?[*]const u8, len: u32) SimStatus {
+    if (len == 0) return .OK;
+    const payload = data orelse return .INVALID_ARG;
+    return adapter.flashWrite(&g_ctx, base_addr, payload, len);
 }
 
 pub export fn sim_can_get_buses(out: ?[*]SimCanBusDesc, capacity: u32, out_written: ?*u32) SimStatus {
@@ -138,4 +143,18 @@ test "template sanity" {
     var out: SimValue = undefined;
     try std.testing.expect(sim_read_val(1, &out) == .OK);
     try std.testing.expectEqual(@as(f32, 10.0), out.data.f32);
+}
+
+test "flash writes persist across init and reset" {
+    const payload = [_]u8{ 0x78, 0x56, 0x34, 0x12 };
+    try std.testing.expect(sim_flash_write(adapter.FlashBase, &payload, payload.len) == .OK);
+    try std.testing.expect(sim_init() == .OK);
+
+    var out: SimValue = undefined;
+    try std.testing.expect(sim_read_val(2, &out) == .OK);
+    try std.testing.expectEqual(@as(u32, 0x1234_5678), out.data.u32);
+
+    try std.testing.expect(sim_reset() == .OK);
+    try std.testing.expect(sim_read_val(2, &out) == .OK);
+    try std.testing.expectEqual(@as(u32, 0x1234_5678), out.data.u32);
 }

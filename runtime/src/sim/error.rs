@@ -19,6 +19,8 @@ pub enum ProjectError {
     InvalidCanMetadata,
     #[error("invalid shared-state metadata from project")]
     InvalidSharedMetadata,
+    #[error("flash support error: {0}")]
+    Flash(String),
 }
 
 #[derive(Debug, Error)]

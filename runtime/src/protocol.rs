@@ -1,4 +1,5 @@
-use crate::sim::types::{SignalType, SignalValue};
+use crate::load::LoadSpec;
+use crate::sim::types::{SignalType, SignalValue, SimCanFrame};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -25,8 +26,7 @@ pub struct Request {
 pub enum Action {
     Ping,
     Load {
-        libpath: String,
-        env_tag: Option<String>,
+        load_spec: LoadSpec,
     },
     Info,
     Signals,
@@ -49,6 +49,10 @@ pub enum Action {
         multiplier: Option<f64>,
     },
     TimeStatus,
+    WorkerCanBuses,
+    WorkerStep {
+        can_rx: Vec<CanBusFramesData>,
+    },
     CanBuses,
     CanAttach {
         bus_name: String,
@@ -77,8 +81,82 @@ pub enum Action {
         data_hex: String,
         flags: Option<u8>,
     },
-    SessionStatus,
-    SessionList,
+    EnvStatus {
+        env: String,
+    },
+    EnvReset {
+        env: String,
+    },
+    EnvTimeStart {
+        env: String,
+    },
+    EnvTimePause {
+        env: String,
+    },
+    EnvTimeStep {
+        env: String,
+        duration: String,
+    },
+    EnvTimeSpeed {
+        env: String,
+        multiplier: Option<f64>,
+    },
+    EnvTimeStatus {
+        env: String,
+    },
+    EnvCanBuses {
+        env: String,
+    },
+    EnvCanLoadDbc {
+        env: String,
+        bus_name: String,
+        path: String,
+    },
+    EnvCanSend {
+        env: String,
+        bus_name: String,
+        arb_id: u32,
+        data_hex: String,
+        flags: Option<u8>,
+    },
+    EnvCanInspect {
+        env: String,
+        bus_name: String,
+    },
+    EnvCanScheduleAdd {
+        env: String,
+        bus_name: String,
+        job_id: Option<String>,
+        arb_id: u32,
+        data_hex: String,
+        every: String,
+        flags: Option<u8>,
+    },
+    EnvCanScheduleUpdate {
+        env: String,
+        job_id: String,
+        arb_id: u32,
+        data_hex: String,
+        every: String,
+        flags: Option<u8>,
+    },
+    EnvCanScheduleRemove {
+        env: String,
+        job_id: String,
+    },
+    EnvCanScheduleStop {
+        env: String,
+        job_id: String,
+    },
+    EnvCanScheduleList {
+        env: String,
+        bus_name: Option<String>,
+    },
+    EnvClose {
+        env: String,
+    },
+    InstanceStatus,
+    InstanceList,
     Close,
 }
 
@@ -161,9 +239,19 @@ pub enum ResponseData {
         arb_id: u32,
         len: u8,
     },
+    CanInspect {
+        bus: String,
+        frames: Vec<CanFrameData>,
+    },
+    CanSchedules {
+        schedules: Vec<CanScheduleData>,
+    },
     DbcLoaded {
         bus: String,
         signal_count: usize,
+    },
+    WorkerStep {
+        can_tx: Vec<CanBusFramesData>,
     },
     SharedChannels {
         channels: Vec<SharedChannelData>,
@@ -181,14 +269,20 @@ pub enum ResponseData {
         steps_executed: usize,
         steps: Vec<RecipeStepResultData>,
     },
-    SessionStatus {
-        session: String,
+    EnvStatus {
+        env: String,
+        running: bool,
+        instance_count: usize,
+        tick_duration_us: u32,
+    },
+    InstanceStatus {
+        instance: String,
         socket_path: String,
         running: bool,
         env: Option<String>,
     },
-    SessionList {
-        sessions: Vec<SessionInfoData>,
+    InstanceList {
+        instances: Vec<InstanceInfoData>,
     },
 }
 
@@ -225,7 +319,7 @@ pub enum TimeStateData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfoData {
+pub struct InstanceInfoData {
     pub name: String,
     pub socket_path: String,
     pub running: bool,
@@ -240,6 +334,91 @@ pub struct CanBusData {
     pub bitrate_data: u32,
     pub fd_capable: bool,
     pub attached_iface: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanBusFramesData {
+    pub bus_name: String,
+    pub frames: Vec<CanFrameWireData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanFrameWireData {
+    pub arb_id: u32,
+    pub len: u8,
+    pub flags: u8,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanFrameData {
+    pub arb_id: u32,
+    pub len: u8,
+    pub flags: u8,
+    pub data_hex: String,
+}
+
+impl From<SimCanFrame> for CanFrameWireData {
+    fn from(value: SimCanFrame) -> Self {
+        Self {
+            arb_id: value.arb_id,
+            len: value.len,
+            flags: value.flags,
+            data: value.payload().to_vec(),
+        }
+    }
+}
+
+impl From<&SimCanFrame> for CanFrameWireData {
+    fn from(value: &SimCanFrame) -> Self {
+        Self {
+            arb_id: value.arb_id,
+            len: value.len,
+            flags: value.flags,
+            data: value.payload().to_vec(),
+        }
+    }
+}
+
+impl TryFrom<CanFrameWireData> for SimCanFrame {
+    type Error = String;
+
+    fn try_from(value: CanFrameWireData) -> Result<Self, Self::Error> {
+        if value.data.len() > 64 {
+            return Err(format!(
+                "CAN frame payload exceeds 64 bytes ({} bytes provided)",
+                value.data.len()
+            ));
+        }
+        let mut data = [0_u8; 64];
+        data[..value.data.len()].copy_from_slice(&value.data);
+        let len = usize::from(value.len);
+        if len != value.data.len() {
+            return Err(format!(
+                "CAN frame length {} does not match payload size {}",
+                value.len,
+                value.data.len()
+            ));
+        }
+        Ok(SimCanFrame {
+            arb_id: value.arb_id,
+            len: value.len,
+            flags: value.flags,
+            data,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanScheduleData {
+    pub job_id: String,
+    pub bus: String,
+    pub arb_id: u32,
+    pub data_hex: String,
+    pub flags: u8,
+    pub every_ticks: u64,
+    pub next_due_tick: u64,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,7 +451,7 @@ pub enum RecipeStepKindData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipeStepResultData {
     pub kind: RecipeStepKindData,
-    pub session: Option<String>,
+    pub instance: Option<String>,
     pub detail: String,
 }
 

@@ -1,3 +1,4 @@
+const std = @import("std");
 const sim_types = @import("sim_types.zig");
 
 pub const SimStatus = sim_types.SimStatus;
@@ -10,14 +11,27 @@ pub const SimSharedSlot = sim_types.SimSharedSlot;
 
 pub const TickDurationUs: u32 = 20;
 
-pub const Ctx = struct {
+pub const FlashBase: u32 = 0x0800_0000;
+pub const FlashSize: u32 = 256;
+
+pub const NonVolatileState = struct {
+    flash: [FlashSize]u8 = [_]u8{0xFF} ** FlashSize,
+};
+
+pub const VolatileState = struct {
     input: f32 = 0.0,
     output: f32 = 0.0,
+};
+
+pub const Ctx = struct {
+    non_volatile: NonVolatileState = .{},
+    runtime: VolatileState = .{},
 };
 
 const signals = [_]SimSignalDesc{
     .{ .id = 0, .name = "demo.input", .type = .F32, .units = null },
     .{ .id = 1, .name = "demo.output", .type = .F32, .units = null },
+    .{ .id = 2, .name = "demo.flash_value", .type = .U32, .units = null },
 };
 
 pub const can_buses = [_]SimCanBusDesc{
@@ -48,16 +62,16 @@ pub const shared_channels = [_]SimSharedDesc{
 };
 
 pub fn init(ctx: *Ctx) SimStatus {
-    ctx.* = .{};
+    ctx.runtime = .{};
     return .OK;
 }
 
 pub fn reset(ctx: *Ctx) void {
-    ctx.* = .{};
+    ctx.runtime = .{};
 }
 
 pub fn tick(ctx: *Ctx) void {
-    ctx.output = ctx.input * 2.0;
+    ctx.runtime.output = ctx.runtime.input * 2.0;
 }
 
 pub fn signalCount() u32 {
@@ -75,11 +89,15 @@ pub fn fillSignals(out: [*]SimSignalDesc, capacity: u32, out_written: *u32) SimS
 pub fn read(ctx: *Ctx, id: u32, out: *SimValue) SimStatus {
     switch (id) {
         0 => {
-            out.* = .{ .type = .F32, .data = .{ .f32 = ctx.input } };
+            out.* = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.input } };
             return .OK;
         },
         1 => {
-            out.* = .{ .type = .F32, .data = .{ .f32 = ctx.output } };
+            out.* = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.output } };
+            return .OK;
+        },
+        2 => {
+            out.* = .{ .type = .U32, .data = .{ .u32 = flashValue(ctx) } };
             return .OK;
         },
         else => return .INVALID_SIGNAL,
@@ -89,7 +107,16 @@ pub fn read(ctx: *Ctx, id: u32, out: *SimValue) SimStatus {
 pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
     if (id != 0) return .INVALID_SIGNAL;
     if (in.type != .F32) return .TYPE_MISMATCH;
-    ctx.input = in.data.f32;
+    ctx.runtime.input = in.data.f32;
+    return .OK;
+}
+
+pub fn flashWrite(ctx: *Ctx, base_addr: u32, data: [*]const u8, len: u32) SimStatus {
+    if (len == 0) return .OK;
+    if (base_addr < FlashBase) return .INVALID_ARG;
+    const offset = base_addr - FlashBase;
+    if (@as(u64, offset) + @as(u64, len) > FlashSize) return .INVALID_ARG;
+    @memcpy(ctx.non_volatile.flash[offset .. offset + len], data[0..len]);
     return .OK;
 }
 
@@ -139,7 +166,7 @@ pub fn sharedRead(ctx: *Ctx, channel_id: u32, slots: [*]const SimSharedSlot, cou
     while (i < count) : (i += 1) {
         const slot = slots[i];
         if (slot.slot_id == 0 and slot.value.type == .F32) {
-            ctx.input = slot.value.data.f32;
+            ctx.runtime.input = slot.value.data.f32;
         }
     }
     return .OK;
@@ -151,8 +178,12 @@ pub fn sharedWrite(ctx: *Ctx, channel_id: u32, out: [*]SimSharedSlot, capacity: 
         out_written.* = capacity;
         return .BUFFER_TOO_SMALL;
     }
-    out[0] = .{ .slot_id = 0, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.input } } };
-    out[1] = .{ .slot_id = 1, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.output } } };
+    out[0] = .{ .slot_id = 0, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.input } } };
+    out[1] = .{ .slot_id = 1, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.output } } };
     out_written.* = 2;
     return .OK;
+}
+
+fn flashValue(ctx: *const Ctx) u32 {
+    return std.mem.readInt(u32, ctx.non_volatile.flash[0..4], .little);
 }

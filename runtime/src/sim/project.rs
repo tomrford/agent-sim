@@ -1,3 +1,4 @@
+use crate::load::ResolvedFlashRegion;
 use crate::sim::error::{ProjectError, SimError};
 use crate::sim::project_loader::{decode_owned_cstr, next_capacity, validate_written};
 use crate::sim::types::{
@@ -17,6 +18,7 @@ type SimWriteValFn = unsafe extern "C" fn(u32, *const SimValueRaw) -> u32;
 type SimGetSignalCountFn = unsafe extern "C" fn(*mut u32) -> u32;
 type SimGetSignalsFn = unsafe extern "C" fn(*mut SimSignalDescRaw, u32, *mut u32) -> u32;
 type SimGetTickDurationUsFn = unsafe extern "C" fn(*mut u32) -> u32;
+type SimFlashWriteFn = unsafe extern "C" fn(u32, *const u8, u32) -> u32;
 type SimCanGetBusesFn = unsafe extern "C" fn(*mut SimCanBusDescRaw, u32, *mut u32) -> u32;
 type SimCanRxFn = unsafe extern "C" fn(u32, *const SimCanFrameRaw, u32) -> u32;
 type SimCanTxFn = unsafe extern "C" fn(u32, *mut SimCanFrameRaw, u32, *mut u32) -> u32;
@@ -63,7 +65,10 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn load(libpath: impl AsRef<Path>) -> Result<Self, ProjectError> {
+    pub fn load(
+        libpath: impl AsRef<Path>,
+        flash_regions: &[ResolvedFlashRegion],
+    ) -> Result<Self, ProjectError> {
         let path = libpath.as_ref().to_path_buf();
         let library =
             unsafe { Library::new(&path) }.map_err(|e| ProjectError::LibraryLoad(e.to_string()))?;
@@ -88,6 +93,9 @@ impl Project {
         let sim_get_tick_duration_us: SimGetTickDurationUsFn =
             *unsafe { library.get::<SimGetTickDurationUsFn>(b"sim_get_tick_duration_us\0") }
                 .map_err(|_| ProjectError::MissingSymbol("sim_get_tick_duration_us"))?;
+        let sim_flash_write = unsafe { library.get::<SimFlashWriteFn>(b"sim_flash_write\0") }
+            .ok()
+            .map(|symbol| *symbol);
         let sim_can_get_buses = unsafe { library.get::<SimCanGetBusesFn>(b"sim_can_get_buses\0") }
             .ok()
             .map(|symbol| *symbol);
@@ -182,6 +190,33 @@ impl Project {
                     .collect::<Result<Vec<_>, _>>()?;
             }
         };
+
+        if !flash_regions.is_empty() {
+            let flash_write = sim_flash_write.ok_or_else(|| {
+                ProjectError::Flash(
+                    "flash regions were configured, but the project does not export sim_flash_write"
+                        .to_string(),
+                )
+            })?;
+            for region in flash_regions {
+                let len = u32::try_from(region.data.len()).map_err(|_| {
+                    ProjectError::Flash(format!(
+                        "flash region at 0x{:08X} is too large ({} bytes)",
+                        region.base_addr,
+                        region.data.len()
+                    ))
+                })?;
+                let status = unsafe { flash_write(region.base_addr, region.data.as_ptr(), len) };
+                if status != STATUS_OK {
+                    return Err(ProjectError::Flash(format!(
+                        "sim_flash_write failed for region 0x{:08X} ({} bytes) with status {}",
+                        region.base_addr,
+                        region.data.len(),
+                        status
+                    )));
+                }
+            }
+        }
 
         let init_status = unsafe { sim_init() };
         if init_status != STATUS_OK {
