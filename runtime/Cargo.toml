@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+can-dbc = "8"
 clap = { version = "4", features = ["derive", "env"] }
 comfy-table = "7"
 dirs = "6"

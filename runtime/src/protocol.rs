@@ -53,6 +53,10 @@ pub enum Action {
     CanDetach {
         bus_name: String,
     },
+    CanLoadDbc {
+        bus_name: String,
+        path: String,
+    },
     CanSend {
         bus_name: String,
         arb_id: u32,
@@ -137,6 +141,10 @@ pub enum ResponseData {
         bus: String,
         arb_id: u32,
         len: u8,
+    },
+    DbcLoaded {
+        bus: String,
+        signal_count: usize,
     },
     WatchSamples {
         samples: Vec<WatchSampleData>,

@@ -1,4 +1,5 @@
 use crate::can::CanSocket;
+use crate::can::dbc::{DbcBusOverlay, decode_signal, encode_signal, frame_key_from_frame};
 use crate::protocol::{
     Action, CanBusData, Request, Response, ResponseData, SessionInfoData, SignalData,
     SignalValueData, parse_duration_us,
@@ -23,6 +24,8 @@ pub struct DaemonState {
     socket_path: PathBuf,
     project: Project,
     can_attached: HashMap<String, AttachedCanBus>,
+    dbc_overlays: HashMap<String, DbcBusOverlay>,
+    frame_state: HashMap<String, HashMap<u32, SimCanFrame>>,
     time: TimeEngine,
     shutdown: bool,
 }
@@ -44,6 +47,8 @@ impl DaemonState {
             socket_path,
             project,
             can_attached: HashMap::new(),
+            dbc_overlays: HashMap::new(),
+            frame_state: HashMap::new(),
             time: TimeEngine::default(),
             shutdown: false,
         }
@@ -328,28 +333,46 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             Ok(ResponseData::Ack)
         }
         Action::Get { selectors } => {
-            let ids = DaemonState::select_signal_ids(&state.project, &selectors)
-                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
             let mut values = Vec::new();
-            for id in ids {
-                let signal = state
-                    .project
-                    .signal_by_id(id)
-                    .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
-                let value = state.project.read(signal).map_err(|e| e.to_string())?;
-                values.push(SignalValueData {
-                    id: signal.id,
-                    name: signal.name.clone(),
-                    signal_type: signal.signal_type,
-                    value,
-                    units: signal.units.clone(),
-                });
+            let mut native_selectors = Vec::new();
+
+            for selector in selectors {
+                if selector.starts_with("can.") {
+                    values.extend(get_can_signal_values(state, &selector)?);
+                } else {
+                    native_selectors.push(selector);
+                }
+            }
+
+            if !native_selectors.is_empty() {
+                let ids = DaemonState::select_signal_ids(&state.project, &native_selectors)
+                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                for id in ids {
+                    let signal = state
+                        .project
+                        .signal_by_id(id)
+                        .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
+                    let value = state.project.read(signal).map_err(|e| e.to_string())?;
+                    values.push(SignalValueData {
+                        id: signal.id,
+                        name: signal.name.clone(),
+                        signal_type: signal.signal_type,
+                        value,
+                        units: signal.units.clone(),
+                    });
+                }
             }
             Ok(ResponseData::SignalValues { values })
         }
         Action::Set { writes } => {
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
+                if selector.starts_with("can.") {
+                    write_can_signal(state, &selector, &raw_value)?;
+                    applied += 1;
+                    continue;
+                }
+
                 let ids =
                     DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
                         .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
@@ -463,6 +486,16 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             }
             Ok(ResponseData::Ack)
         }
+        Action::CanLoadDbc { bus_name, path } => {
+            let _ = find_can_bus_meta(state, &bus_name)?;
+            let overlay = DbcBusOverlay::load(std::path::Path::new(&path))?;
+            let signal_count = overlay.signal_names().count();
+            state.dbc_overlays.insert(bus_name.clone(), overlay);
+            Ok(ResponseData::DbcLoaded {
+                bus: bus_name,
+                signal_count,
+            })
+        }
         Action::CanSend {
             bus_name,
             arb_id,
@@ -484,6 +517,7 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
             };
             validate_can_frame(&attachment.meta, &frame)?;
             attachment.socket.send(&frame)?;
+            record_frame(state, &bus_name, &frame);
             Ok(ResponseData::CanSend {
                 bus: bus_name,
                 arb_id,
@@ -537,6 +571,7 @@ fn advance_project_ticks(state: &mut DaemonState, ticks: u64) -> Result<(), Stri
 }
 
 fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
+    let mut frame_updates = Vec::new();
     for (bus_name, attachment) in &mut state.can_attached {
         let frames = attachment.socket.recv_all()?;
         if frames.is_empty() {
@@ -544,16 +579,21 @@ fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
         }
         for frame in &frames {
             validate_can_frame(&attachment.meta, frame)?;
+            frame_updates.push((bus_name.clone(), frame.clone()));
         }
         state
             .project
             .can_rx(attachment.meta.id, &frames)
             .map_err(|e| format!("sim_can_rx failed for bus '{bus_name}': {e}"))?;
     }
+    for (bus_name, frame) in frame_updates {
+        record_frame(state, &bus_name, &frame);
+    }
     Ok(())
 }
 
 fn process_can_tx(state: &mut DaemonState) -> Result<(), String> {
+    let mut frame_updates = Vec::new();
     for (bus_name, attachment) in &mut state.can_attached {
         let tx_frames = state
             .project
@@ -562,7 +602,11 @@ fn process_can_tx(state: &mut DaemonState) -> Result<(), String> {
         for frame in tx_frames {
             validate_can_frame(&attachment.meta, &frame)?;
             attachment.socket.send(&frame)?;
+            frame_updates.push((bus_name.clone(), frame));
         }
+    }
+    for (bus_name, frame) in frame_updates {
+        record_frame(state, &bus_name, &frame);
     }
     Ok(())
 }
@@ -575,6 +619,156 @@ fn find_can_bus_meta(state: &DaemonState, bus_name: &str) -> Result<SimCanBusDes
         .find(|bus| bus.name == bus_name)
         .cloned()
         .ok_or_else(|| format!("CAN bus '{bus_name}' not declared by loaded project"))
+}
+
+fn get_can_signal_values(
+    state: &DaemonState,
+    selector: &str,
+) -> Result<Vec<SignalValueData>, String> {
+    let (bus_name, signal_selector) = parse_can_selector(selector)?;
+    let overlay = state
+        .dbc_overlays
+        .get(bus_name)
+        .ok_or_else(|| format!("no DBC loaded for CAN bus '{bus_name}'"))?;
+    if signal_selector == "*" {
+        let mut values = Vec::new();
+        let mut names = overlay.signal_names().cloned().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let signal = overlay
+                .signal(&name)
+                .ok_or_else(|| format!("DBC signal '{name}' not found"))?;
+            let frame = latest_frame_for_signal(state, bus_name, signal)?;
+            let value = decode_signal(frame, signal)?;
+            values.push(SignalValueData {
+                id: signal.arb_id,
+                name: format!("can.{bus_name}.{}", signal.name),
+                signal_type: SignalType::F64,
+                value: SignalValue::F64(value),
+                units: signal.unit.clone(),
+            });
+        }
+        return Ok(values);
+    }
+
+    let signal = overlay
+        .signal(signal_selector)
+        .ok_or_else(|| format!("CAN signal '{signal_selector}' not found on bus '{bus_name}'"))?;
+    let frame = latest_frame_for_signal(state, bus_name, signal)?;
+    let value = decode_signal(frame, signal)?;
+    Ok(vec![SignalValueData {
+        id: signal.arb_id,
+        name: format!("can.{bus_name}.{}", signal.name),
+        signal_type: SignalType::F64,
+        value: SignalValue::F64(value),
+        units: signal.unit.clone(),
+    }])
+}
+
+fn write_can_signal(
+    state: &mut DaemonState,
+    selector: &str,
+    raw_value: &str,
+) -> Result<(), String> {
+    let (bus_name, signal_name) = parse_can_selector(selector)?;
+    if signal_name == "*" {
+        return Err(format!(
+            "wildcard writes are not supported for CAN selectors: '{selector}'"
+        ));
+    }
+    let physical_value = raw_value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid CAN signal value '{raw_value}'"))?;
+
+    let signal = {
+        let overlay = state
+            .dbc_overlays
+            .get(bus_name)
+            .ok_or_else(|| format!("no DBC loaded for CAN bus '{bus_name}'"))?;
+        overlay
+            .signal(signal_name)
+            .cloned()
+            .ok_or_else(|| format!("CAN signal '{signal_name}' not found on bus '{bus_name}'"))?
+    };
+
+    let mut frame = state
+        .frame_state
+        .get(bus_name)
+        .and_then(|frames| frames.get(&signal.frame_key))
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut data = [0_u8; 64];
+            let len = signal.message_size.min(64);
+            if len == 0 {
+                data[0] = 0;
+            }
+            SimCanFrame {
+                arb_id: signal.arb_id,
+                len,
+                flags: if signal.extended {
+                    CAN_FLAG_EXTENDED
+                } else {
+                    0
+                },
+                data,
+            }
+        });
+    frame.arb_id = signal.arb_id;
+    if signal.extended {
+        frame.flags |= CAN_FLAG_EXTENDED;
+    } else {
+        frame.flags &= !CAN_FLAG_EXTENDED;
+    }
+
+    encode_signal(&mut frame, &signal, physical_value)?;
+
+    let attachment = state
+        .can_attached
+        .get(bus_name)
+        .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
+    validate_can_frame(&attachment.meta, &frame)?;
+    attachment.socket.send(&frame)?;
+    record_frame(state, bus_name, &frame);
+    Ok(())
+}
+
+fn latest_frame_for_signal<'a>(
+    state: &'a DaemonState,
+    bus_name: &str,
+    signal: &crate::can::dbc::DbcSignalDef,
+) -> Result<&'a SimCanFrame, String> {
+    state
+        .frame_state
+        .get(bus_name)
+        .and_then(|frames| frames.get(&signal.frame_key))
+        .ok_or_else(|| {
+            format!(
+                "no frame observed yet for CAN signal 'can.{bus_name}.{}' (arb_id=0x{:X})",
+                signal.name, signal.arb_id
+            )
+        })
+}
+
+fn parse_can_selector(selector: &str) -> Result<(&str, &str), String> {
+    let Some(rest) = selector.strip_prefix("can.") else {
+        return Err(format!("invalid CAN selector '{selector}'"));
+    };
+    let Some((bus_name, signal_name)) = rest.split_once('.') else {
+        return Err(format!(
+            "invalid CAN selector '{selector}'; expected can.<bus>.<signal>"
+        ));
+    };
+    if bus_name.is_empty() || signal_name.is_empty() {
+        return Err(format!(
+            "invalid CAN selector '{selector}'; expected can.<bus>.<signal>"
+        ));
+    }
+    Ok((bus_name, signal_name))
+}
+
+fn record_frame(state: &mut DaemonState, bus_name: &str, frame: &SimCanFrame) {
+    let bus_frames = state.frame_state.entry(bus_name.to_string()).or_default();
+    bus_frames.insert(frame_key_from_frame(frame), frame.clone());
 }
 
 fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {

@@ -21,6 +21,10 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             CanCommand::Detach { bus } => Action::CanDetach {
                 bus_name: bus.clone(),
             },
+            CanCommand::LoadDbc { bus, path } => Action::CanLoadDbc {
+                bus_name: bus.clone(),
+                path: path.clone(),
+            },
             CanCommand::Send {
                 bus,
                 arb_id,

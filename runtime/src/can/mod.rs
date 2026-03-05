@@ -1,3 +1,5 @@
+pub mod dbc;
+
 use crate::sim::types::{
     CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RTR, SimCanFrame,
 };

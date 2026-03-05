@@ -142,6 +142,9 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Some(ResponseData::CanSend { bus, arb_id, len }) => {
             println!("Sent frame on {bus}: id=0x{arb_id:X} len={len}");
         }
+        Some(ResponseData::DbcLoaded { bus, signal_count }) => {
+            println!("Loaded DBC for {bus}: {signal_count} signals");
+        }
         Some(ResponseData::WatchSamples { samples }) => {
             for sample in samples {
                 println!(

@@ -74,6 +74,10 @@ pub enum CanCommand {
     Detach {
         bus: String,
     },
+    LoadDbc {
+        bus: String,
+        path: String,
+    },
     Send {
         bus: String,
         arb_id: String,
