@@ -16,7 +16,7 @@ use crate::daemon::lifecycle;
 use crate::protocol::{Action, Request, Response, ResponseData, SignalValueData, WatchSampleData};
 use crate::sim::types::SignalValue;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
@@ -337,7 +337,7 @@ async fn apply_env_bus_wiring(
         )
         .await?;
         if let Some(dbc_path) = &bus.dbc {
-            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir);
+            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir)?;
             send_action_success(
                 &session_name,
                 Action::CanLoadDbc {
@@ -351,15 +351,31 @@ async fn apply_env_bus_wiring(
     Ok(())
 }
 
-fn resolve_config_relative_path(raw_path: &str, config_base_dir: Option<&Path>) -> String {
+fn resolve_config_relative_path(
+    raw_path: &str,
+    config_base_dir: Option<&Path>,
+) -> Result<String, CliError> {
     let path = Path::new(raw_path);
-    if path.is_absolute() {
-        return raw_path.to_string();
-    }
-    if let Some(base_dir) = config_base_dir {
-        return base_dir.join(path).to_string_lossy().into_owned();
-    }
-    raw_path.to_string()
+    let candidate: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(base_dir) = config_base_dir {
+        base_dir.join(path)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| {
+                CliError::CommandFailed(format!(
+                    "failed to determine current working directory while resolving DBC path '{raw_path}': {e}"
+                ))
+            })?
+            .join(path)
+    };
+    let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+        CliError::CommandFailed(format!(
+            "failed to resolve DBC path '{raw_path}' to an absolute path (candidate '{}'): {e}",
+            candidate.display()
+        ))
+    })?;
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 async fn apply_env_shared_wiring(
@@ -821,26 +837,57 @@ fn response_error(response: &Response) -> String {
 #[cfg(test)]
 mod tests {
     use super::{RecipeOp, compile_for_step, resolve_config_relative_path};
+    use crate::cli::error::CliError;
     use crate::config::recipe::ForSpec;
     use std::path::Path;
 
     #[test]
     fn resolve_config_relative_path_joins_relative_to_config_dir() {
-        let resolved =
-            resolve_config_relative_path("dbc/internal.dbc", Some(Path::new("/tmp/agent-sim")));
-        assert_eq!(resolved, "/tmp/agent-sim/dbc/internal.dbc");
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let config_dir = temp.path().join("cfg");
+        let dbc_dir = config_dir.join("dbc");
+        let dbc = dbc_dir.join("internal.dbc");
+        std::fs::create_dir_all(&dbc_dir).expect("dbc dir should be creatable");
+        std::fs::write(&dbc, "VERSION \"\"").expect("dbc file should be writable");
+
+        let resolved = resolve_config_relative_path("dbc/internal.dbc", Some(config_dir.as_path()))
+            .expect("relative DBC path should resolve");
+        let expected = std::fs::canonicalize(&dbc)
+            .expect("dbc should canonicalize")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolved, expected);
     }
 
     #[test]
     fn resolve_config_relative_path_keeps_absolute_paths() {
-        let absolute = std::env::temp_dir()
-            .join("agent-sim")
-            .join("internal.dbc")
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let absolute = temp.path().join("internal.dbc");
+        std::fs::write(&absolute, "VERSION \"\"").expect("dbc file should be writable");
+        let resolved = resolve_config_relative_path(
+            &absolute.to_string_lossy(),
+            Some(Path::new("/tmp/unused")),
+        )
+        .expect("absolute path should resolve");
+        let expected = std::fs::canonicalize(&absolute)
+            .expect("absolute path should canonicalize")
             .to_string_lossy()
             .into_owned();
-        let resolved =
-            resolve_config_relative_path(&absolute, Some(Path::new("/tmp/should-not-apply")));
-        assert_eq!(resolved, absolute);
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_config_relative_path_rejects_missing_file() {
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let err = resolve_config_relative_path("missing.dbc", Some(temp.path()))
+            .expect_err("missing DBC should fail early");
+        let CliError::CommandFailed(message) = err else {
+            panic!("expected command failure");
+        };
+        assert!(
+            message.contains("failed to resolve DBC path"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
