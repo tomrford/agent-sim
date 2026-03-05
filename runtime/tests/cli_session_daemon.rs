@@ -55,12 +55,18 @@ fn multiple_sessions_run_independent_device_states() {
     let _ = run_agent(&["--session", &session_a, "set", "demo.input", "3.0"]);
     let _ = run_agent(&["--session", &session_a, "time", "step", "20us"]);
     let out_a = run_agent(&["--session", &session_a, "get", "demo.output"]);
-    assert!(out_a.contains("6"), "expected session A output 6, got: {out_a}");
+    assert!(
+        out_a.contains("6"),
+        "expected session A output 6, got: {out_a}"
+    );
 
     let _ = run_agent(&["--session", &session_b, "set", "demo.input", "9.0"]);
     let _ = run_agent(&["--session", &session_b, "time", "step", "20us"]);
     let out_b = run_agent(&["--session", &session_b, "get", "demo.output"]);
-    assert!(out_b.contains("18"), "expected session B output 18, got: {out_b}");
+    assert!(
+        out_b.contains("18"),
+        "expected session B output 18, got: {out_b}"
+    );
 
     let _ = run_agent(&["--session", &session_a, "close"]);
     let _ = run_agent(&["--session", &session_b, "close"]);

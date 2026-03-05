@@ -19,16 +19,6 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Set(set) => Action::Set {
             writes: parse_set_entries(set)?,
         },
-        Command::Watch(watch) => Action::Watch {
-            selector: watch.selector.clone(),
-            interval_ms: watch.interval_ms,
-            samples: watch.samples,
-        },
-        Command::Run(run) => Action::RunRecipe {
-            recipe: run.recipe_name.clone(),
-            dry_run: run.dry_run,
-            config: args.config.clone(),
-        },
         Command::Close => Action::Close,
         Command::Session(session) => match session.command {
             Some(SessionCommand::List) => Action::SessionList,
@@ -45,6 +35,11 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             },
             TimeCommand::Status => Action::TimeStatus,
         },
+        Command::Watch(_) | Command::Run(_) => {
+            return Err(CliError::CommandFailed(
+                "watch/run are handled by the CLI executor".to_string(),
+            ));
+        }
     };
     Ok(Request {
         id: Uuid::new_v4(),

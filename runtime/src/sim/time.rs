@@ -85,6 +85,10 @@ impl TimeEngine {
         self.speed
     }
 
+    pub fn is_running(&self) -> bool {
+        self.state == TimeStateData::Running
+    }
+
     pub fn step(&mut self, project: &Project, duration_us: u64) -> Result<StepResult, TimeError> {
         if self.state == TimeStateData::Running {
             return Err(TimeError::StepWhileRunning);

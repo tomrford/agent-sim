@@ -24,37 +24,17 @@ pub struct Request {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Action {
     Ping,
-    Load {
-        libpath: String,
-    },
+    Load { libpath: String },
     Info,
     Signals,
     Reset,
-    Get {
-        selectors: Vec<String>,
-    },
-    Set {
-        writes: BTreeMap<String, String>,
-    },
+    Get { selectors: Vec<String> },
+    Set { writes: BTreeMap<String, String> },
     TimeStart,
     TimePause,
-    TimeStep {
-        duration: String,
-    },
-    TimeSpeed {
-        multiplier: Option<f64>,
-    },
+    TimeStep { duration: String },
+    TimeSpeed { multiplier: Option<f64> },
     TimeStatus,
-    Watch {
-        selector: String,
-        interval_ms: u64,
-        samples: Option<u32>,
-    },
-    RunRecipe {
-        recipe: String,
-        dry_run: bool,
-        config: Option<String>,
-    },
     SessionStatus,
     SessionList,
     Close,
