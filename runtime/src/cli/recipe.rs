@@ -5,6 +5,7 @@ use crate::config::load_config;
 use crate::config::recipe::{
     AssertSpec, ForSpec, PrintSpec, RecipeStep, StepSpec, toml_value_to_cli_string,
 };
+use crate::connection::send_env_request;
 use crate::daemon::lifecycle;
 use crate::protocol::{
     Action, RecipeStepKindData, RecipeStepResultData, ResponseData, SignalValueData,
@@ -22,27 +23,27 @@ enum RecipeOp {
         value: f64,
     },
     Set {
-        session: Option<String>,
+        instance: Option<String>,
         writes: BTreeMap<String, String>,
     },
     Step {
-        session: Option<String>,
+        instance: Option<String>,
         duration: String,
     },
     Print {
-        session: Option<String>,
+        instance: Option<String>,
         selectors: Vec<String>,
     },
     Speed {
-        session: Option<String>,
+        instance: Option<String>,
         speed: f64,
     },
     Reset {
-        session: Option<String>,
+        instance: Option<String>,
     },
     SleepMs(u64),
     Assert {
-        session: Option<String>,
+        instance: Option<String>,
         assert: AssertSpec,
     },
 }
@@ -57,16 +58,16 @@ pub(crate) async fn run_recipe_command(
         .recipe(&run.recipe_name)
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
 
-    let default_session = recipe_def
-        .session
+    let default_instance = recipe_def
+        .instance
         .as_deref()
-        .unwrap_or(args.session.as_str())
+        .unwrap_or(args.instance.as_str())
         .to_string();
-    validate_recipe_preconditions(recipe_def, &default_session).await?;
+    validate_recipe_preconditions(recipe_def, &default_instance).await?;
 
     let mut ops = Vec::new();
     compile_recipe_steps(&recipe_def.steps, &mut ops, None).map_err(CliError::CommandFailed)?;
-    let steps = execute_recipe_ops(&default_session, &ops, run.dry_run).await?;
+    let steps = execute_recipe_ops(&default_instance, &ops, run.dry_run).await?;
 
     let response = crate::protocol::Response::ok(
         Uuid::new_v4(),
@@ -83,7 +84,7 @@ pub(crate) async fn run_recipe_command(
 
 async fn validate_recipe_preconditions(
     recipe: &crate::config::recipe::RecipeDef,
-    default_session: &str,
+    default_instance: &str,
 ) -> Result<(), CliError> {
     let sessions = lifecycle::list_sessions()
         .await
@@ -94,44 +95,48 @@ async fn validate_recipe_preconditions(
         .map(|(name, _, _, env)| (name.clone(), env.clone()))
         .collect::<Vec<_>>();
 
-    let default_session_env = running
+    let default_instance_env = running
         .iter()
-        .find(|(name, _)| name == default_session)
+        .find(|(name, _)| name == default_instance)
         .map(|(_, env)| env.as_deref());
-    if default_session_env.is_none() {
+    if default_instance_env.is_none() {
         return Err(CliError::CommandFailed(format!(
-            "recipe target session '{default_session}' is not running"
+            "recipe target instance '{default_instance}' is not running"
         )));
     }
 
     if !recipe.env.is_empty() {
-        validate_allowed_env(default_session, default_session_env.flatten(), &recipe.env)?;
+        validate_allowed_env(
+            default_instance,
+            default_instance_env.flatten(),
+            &recipe.env,
+        )?;
     }
 
-    for session_name in &recipe.sessions {
-        let session_env = running
+    for instance_name in &recipe.instances {
+        let instance_env = running
             .iter()
-            .find(|(name, _)| name == session_name)
+            .find(|(name, _)| name == instance_name)
             .map(|(_, env)| env.as_deref());
-        if session_env.is_none() {
+        if instance_env.is_none() {
             return Err(CliError::CommandFailed(format!(
-                "recipe requires session '{session_name}' to be running"
+                "recipe requires instance '{instance_name}' to be running"
             )));
         }
         if !recipe.env.is_empty() {
-            validate_allowed_env(session_name, session_env.flatten(), &recipe.env)?;
+            validate_allowed_env(instance_name, instance_env.flatten(), &recipe.env)?;
         }
     }
     Ok(())
 }
 
 fn validate_allowed_env(
-    session_name: &str,
-    session_env: Option<&str>,
+    instance_name: &str,
+    instance_env: Option<&str>,
     allowed_envs: &[String],
 ) -> Result<(), CliError> {
     let allowed = allowed_envs.join(", ");
-    match session_env {
+    match instance_env {
         Some(env_name)
             if allowed_envs
                 .iter()
@@ -140,10 +145,10 @@ fn validate_allowed_env(
             Ok(())
         }
         Some(env_name) => Err(CliError::CommandFailed(format!(
-            "recipe only allowed in envs [{allowed}], but session '{session_name}' is in env '{env_name}'"
+            "recipe only allowed in envs [{allowed}], but instance '{instance_name}' is in env '{env_name}'"
         ))),
         None => Err(CliError::CommandFailed(format!(
-            "recipe only allowed in envs [{allowed}], but session '{session_name}' is not attached to any env"
+            "recipe only allowed in envs [{allowed}], but instance '{instance_name}' is not attached to any env"
         ))),
     }
 }
@@ -151,11 +156,11 @@ fn validate_allowed_env(
 fn compile_recipe_steps(
     steps: &[RecipeStep],
     ops: &mut Vec<RecipeOp>,
-    inherited_session: Option<&str>,
+    inherited_instance: Option<&str>,
 ) -> Result<(), String> {
     for step in steps {
         match step {
-            RecipeStep::Set { set, session } => {
+            RecipeStep::Set { set, instance } => {
                 let mut writes = BTreeMap::new();
                 for (key, value) in set {
                     writes.insert(
@@ -163,62 +168,67 @@ fn compile_recipe_steps(
                         toml_value_to_cli_string(value).map_err(|e| e.to_string())?,
                     );
                 }
-                let session = session
+                let instance = instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
-                ops.push(RecipeOp::Set { session, writes });
+                    .or_else(|| inherited_instance.map(ToString::to_string));
+                ops.push(RecipeOp::Set { instance, writes });
             }
-            RecipeStep::Step { step, session } => {
-                let (duration, nested_session) = match step {
+            RecipeStep::Step { step, instance } => {
+                let (duration, nested_instance) = match step {
                     StepSpec::Duration(duration) => (duration.clone(), None),
-                    StepSpec::Detailed { duration, session } => (duration.clone(), session.clone()),
+                    StepSpec::Detailed { duration, instance } => {
+                        (duration.clone(), instance.clone())
+                    }
                 };
-                let session = nested_session
-                    .or_else(|| session.clone())
-                    .or_else(|| inherited_session.map(ToString::to_string));
-                ops.push(RecipeOp::Step { session, duration });
+                let instance = nested_instance
+                    .or_else(|| instance.clone())
+                    .or_else(|| inherited_instance.map(ToString::to_string));
+                ops.push(RecipeOp::Step { instance, duration });
             }
-            RecipeStep::Print { print, session } => {
+            RecipeStep::Print { print, instance } => {
                 let selectors = match print {
                     PrintSpec::All(value) if value == "*" => vec!["*".to_string()],
                     PrintSpec::All(value) => vec![value.clone()],
                     PrintSpec::Signals(values) => values.clone(),
                 };
-                let session = session
+                let instance = instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
-                ops.push(RecipeOp::Print { session, selectors });
+                    .or_else(|| inherited_instance.map(ToString::to_string));
+                ops.push(RecipeOp::Print {
+                    instance,
+                    selectors,
+                });
             }
-            RecipeStep::Speed { speed, session } => {
-                let session = session
+            RecipeStep::Speed { speed, instance } => {
+                let instance = instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
+                    .or_else(|| inherited_instance.map(ToString::to_string));
                 ops.push(RecipeOp::Speed {
-                    session,
+                    instance,
                     speed: *speed,
                 });
             }
-            RecipeStep::Reset { session, .. } => {
-                let session = session
+            RecipeStep::Reset { instance, .. } => {
+                let instance = instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
-                ops.push(RecipeOp::Reset { session });
+                    .or_else(|| inherited_instance.map(ToString::to_string));
+                ops.push(RecipeOp::Reset { instance });
             }
             RecipeStep::Sleep { sleep: ms } => ops.push(RecipeOp::SleepMs(*ms)),
-            RecipeStep::For { r#for, session } => {
-                let session = session
+            RecipeStep::For { r#for, instance } => {
+                let instance = instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
-                compile_for_step(r#for, ops, session.as_deref())?;
+                    .or_else(|| inherited_instance.map(ToString::to_string));
+                compile_for_step(r#for, ops, instance.as_deref())?;
             }
             RecipeStep::Assert { assert } => {
                 validate_assert_spec(&assert.signal, assert)?;
-                let session = assert
-                    .session
+                let instance = assert
+                    .instance
                     .clone()
-                    .or_else(|| inherited_session.map(ToString::to_string));
+                    .or_else(|| inherited_instance.map(ToString::to_string));
                 ops.push(RecipeOp::Assert {
-                    session,
+                    instance,
                     assert: assert.clone(),
                 });
             }
@@ -230,7 +240,7 @@ fn compile_recipe_steps(
 fn compile_for_step(
     spec: &ForSpec,
     ops: &mut Vec<RecipeOp>,
-    inherited_session: Option<&str>,
+    inherited_instance: Option<&str>,
 ) -> Result<(), String> {
     if spec.by == 0.0 {
         return Err("for.by cannot be zero".to_string());
@@ -260,16 +270,16 @@ fn compile_for_step(
         let mut writes = BTreeMap::new();
         writes.insert(spec.signal.clone(), current.to_string());
         ops.push(RecipeOp::Set {
-            session: inherited_session.map(ToString::to_string),
+            instance: inherited_instance.map(ToString::to_string),
             writes,
         });
-        compile_recipe_steps(&spec.each, ops, inherited_session)?;
+        compile_recipe_steps(&spec.each, ops, inherited_instance)?;
     }
     Ok(())
 }
 
 async fn execute_recipe_ops(
-    default_session: &str,
+    default_instance: &str,
     ops: &[RecipeOp],
     dry_run: bool,
 ) -> Result<Vec<RecipeStepResultData>, CliError> {
@@ -283,11 +293,11 @@ async fn execute_recipe_ops(
                     format!("{signal}={value}"),
                 ));
             }
-            RecipeOp::Set { session, writes } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Set { instance, writes } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
                     send_action_success(
-                        &session_name,
+                        &instance_name,
                         Action::Set {
                             writes: writes.clone(),
                         },
@@ -296,7 +306,7 @@ async fn execute_recipe_ops(
                 }
                 results.push(step_result(
                     RecipeStepKindData::Set,
-                    Some(session_name),
+                    Some(instance_name),
                     format!(
                         "{} write(s): {}",
                         writes.len(),
@@ -304,62 +314,87 @@ async fn execute_recipe_ops(
                     ),
                 ));
             }
-            RecipeOp::Step { session, duration } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Step { instance, duration } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    send_action_success(
-                        &session_name,
-                        Action::TimeStep {
-                            duration: duration.clone(),
-                        },
-                    )
-                    .await?;
+                    if let Some(env_name) = attached_env_name(&instance_name).await? {
+                        send_env_action_success(
+                            &env_name,
+                            Action::EnvTimeStep {
+                                env: env_name.clone(),
+                                duration: duration.clone(),
+                            },
+                        )
+                        .await?;
+                    } else {
+                        send_action_success(
+                            &instance_name,
+                            Action::TimeStep {
+                                duration: duration.clone(),
+                            },
+                        )
+                        .await?;
+                    }
                 }
                 results.push(step_result(
                     RecipeStepKindData::Step,
-                    Some(session_name),
+                    Some(instance_name),
                     duration.clone(),
                 ));
             }
-            RecipeOp::Print { session, selectors } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Print {
+                instance,
+                selectors,
+            } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 let detail = if dry_run {
                     format!("selectors={}", selectors.join(","))
                 } else {
-                    let values = fetch_print_values(&session_name, selectors).await?;
+                    let values = fetch_print_values(&instance_name, selectors).await?;
                     format_signal_values_summary(&values)
                 };
                 results.push(step_result(
                     RecipeStepKindData::Print,
-                    Some(session_name),
+                    Some(instance_name),
                     detail,
                 ));
             }
-            RecipeOp::Speed { session, speed } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Speed { instance, speed } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    send_action_success(
-                        &session_name,
-                        Action::TimeSpeed {
-                            multiplier: Some(*speed),
-                        },
-                    )
-                    .await?;
+                    if let Some(env_name) = attached_env_name(&instance_name).await? {
+                        send_env_action_success(
+                            &env_name,
+                            Action::EnvTimeSpeed {
+                                env: env_name.clone(),
+                                multiplier: Some(*speed),
+                            },
+                        )
+                        .await?;
+                    } else {
+                        send_action_success(
+                            &instance_name,
+                            Action::TimeSpeed {
+                                multiplier: Some(*speed),
+                            },
+                        )
+                        .await?;
+                    }
                 }
                 results.push(step_result(
                     RecipeStepKindData::Speed,
-                    Some(session_name),
+                    Some(instance_name),
                     speed.to_string(),
                 ));
             }
-            RecipeOp::Reset { session } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Reset { instance } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    send_action_success(&session_name, Action::Reset).await?;
+                    send_action_success(&instance_name, Action::Reset).await?;
                 }
                 results.push(step_result(
                     RecipeStepKindData::Reset,
-                    Some(session_name),
+                    Some(instance_name),
                     "reset".to_string(),
                 ));
             }
@@ -373,24 +408,24 @@ async fn execute_recipe_ops(
                     format!("{ms}ms"),
                 ));
             }
-            RecipeOp::Assert { session, assert } => {
-                let session_name = resolve_session(default_session, session);
+            RecipeOp::Assert { instance, assert } => {
+                let instance_name = resolve_instance(default_instance, instance);
                 if dry_run {
                     results.push(step_result(
                         RecipeStepKindData::Assert,
-                        Some(session_name),
+                        Some(instance_name),
                         format!("signal={}", assert.signal),
                     ));
                     continue;
                 }
                 let (tick, time_us, value) =
-                    fetch_signal_sample(&session_name, &assert.signal).await?;
+                    fetch_signal_sample(&instance_name, &assert.signal).await?;
                 evaluate_assertion(&assert.signal, &value.value, assert).map_err(|message| {
                     CliError::AssertionFailed(format!("{message}; tick={tick} time_us={time_us}"))
                 })?;
                 results.push(step_result(
                     RecipeStepKindData::Assert,
-                    Some(session_name),
+                    Some(instance_name),
                     format!("{} @ tick={} time_us={}", assert.signal, tick, time_us),
                 ));
             }
@@ -434,18 +469,45 @@ fn format_signal_values_summary(values: &[SignalValueData]) -> String {
 
 fn step_result(
     kind: RecipeStepKindData,
-    session: Option<String>,
+    instance: Option<String>,
     detail: String,
 ) -> RecipeStepResultData {
     RecipeStepResultData {
         kind,
-        session,
+        instance,
         detail,
     }
 }
 
-fn resolve_session(default_session: &str, session: &Option<String>) -> String {
-    session.as_deref().unwrap_or(default_session).to_string()
+fn resolve_instance(default_instance: &str, instance: &Option<String>) -> String {
+    instance.as_deref().unwrap_or(default_instance).to_string()
+}
+
+async fn attached_env_name(instance: &str) -> Result<Option<String>, CliError> {
+    let running = lifecycle::list_sessions()
+        .await
+        .map_err(|err| CliError::CommandFailed(err.to_string()))?;
+    Ok(running
+        .into_iter()
+        .find(|(name, _, is_running, _)| name == instance && *is_running)
+        .and_then(|(_, _, _, env)| env))
+}
+
+async fn send_env_action_success(env: &str, action: Action) -> Result<(), CliError> {
+    let response = send_env_request(
+        env,
+        &crate::protocol::Request {
+            id: Uuid::new_v4(),
+            action,
+        },
+    )
+    .await
+    .map_err(|err| CliError::CommandFailed(err.to_string()))?;
+    if response.success {
+        Ok(())
+    } else {
+        Err(CliError::CommandFailed(response_error(&response)))
+    }
 }
 
 fn validate_assert_spec(signal: &str, assert: &AssertSpec) -> Result<(), String> {
@@ -646,7 +708,7 @@ mod tests {
             "demo.output",
             &AssertSpec {
                 signal: "demo.output".to_string(),
-                session: None,
+                instance: None,
                 eq: None,
                 gt: None,
                 lt: None,

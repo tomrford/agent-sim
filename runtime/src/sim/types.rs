@@ -263,7 +263,7 @@ impl SimCanFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimCanBusDesc {
     pub id: u32,
     pub name: String,

@@ -15,10 +15,10 @@ fn set_step_get_template_signals() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let _ = run_agent(&["--session", &session, "set", "demo.input", "5.0"]);
-    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
-    let out = run_agent(&["--session", &session, "get", "demo.output"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "set", "demo.input", "5.0"]);
+    let _ = run_agent(&["--instance", &session, "time", "step", "20us"]);
+    let out = run_agent(&["--instance", &session, "get", "demo.output"]);
 
     assert!(out.contains("demo.output"));
     assert!(
@@ -26,7 +26,7 @@ fn set_step_get_template_signals() {
         "expected scaled output value in get output: {out}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -39,20 +39,20 @@ fn hvac_writable_and_read_only_signal_behavior() {
         .expect("hvac path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let _ = run_agent(&["--session", &session, "set", "hvac.power", "true"]);
-    let _ = run_agent(&["--session", &session, "set", "hvac.target_temp", "25.0"]);
-    let _ = run_agent(&["--session", &session, "time", "step", "20ms"]);
-    let state = run_agent(&["--session", &session, "get", "hvac.state"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "set", "hvac.power", "true"]);
+    let _ = run_agent(&["--instance", &session, "set", "hvac.target_temp", "25.0"]);
+    let _ = run_agent(&["--instance", &session, "time", "step", "20ms"]);
+    let state = run_agent(&["--instance", &session, "get", "hvac.state"]);
     assert!(state.contains("hvac.state"));
 
-    let err = run_agent_fail(&["--session", &session, "set", "hvac.state", "1"]);
+    let err = run_agent_fail(&["--instance", &session, "set", "hvac.state", "1"]);
     assert!(
         err.contains("signal not found: 'hvac.state'"),
         "expected read-only write rejection, got: {err}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -65,12 +65,12 @@ fn glob_selector_reads_matching_signals() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let out = run_agent(&["--session", &session, "get", "demo.*"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let out = run_agent(&["--instance", &session, "get", "demo.*"]);
     assert!(out.contains("demo.input"));
     assert!(out.contains("demo.output"));
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -83,19 +83,19 @@ fn wildcard_and_id_selectors_work() {
         .expect("template path should be valid utf8")
         .to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let all = run_agent(&["--session", &session, "get", "*"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let all = run_agent(&["--instance", &session, "get", "*"]);
     assert!(all.contains("demo.input"));
     assert!(all.contains("demo.output"));
 
-    let by_id = run_agent(&["--session", &session, "get", "#1"]);
+    let by_id = run_agent(&["--instance", &session, "get", "#1"]);
     assert!(by_id.contains("demo.output"));
 
-    let missing = run_agent_fail(&["--session", &session, "get", "#999"]);
+    let missing = run_agent_fail(&["--instance", &session, "get", "#999"]);
     assert!(
         missing.contains("signal not found: '#999'"),
         "expected missing id error, got: {missing}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

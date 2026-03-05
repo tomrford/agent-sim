@@ -1,5 +1,5 @@
 use crate::cli::args::{
-    CanCommand, CliArgs, Command, SessionCommand, SetArgs, SharedCommand, TimeCommand,
+    CanCommand, CliArgs, Command, InstanceCommand, SetArgs, SharedCommand, TimeCommand,
 };
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
@@ -10,10 +10,6 @@ use uuid::Uuid;
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
     let action = match command {
-        Command::Load(load) => Action::Load {
-            libpath: load.libpath.clone(),
-            env_tag: args.env_tag.clone(),
-        },
         Command::Info => Action::Info,
         Command::Signals => Action::Signals,
         Command::Shared(shared) => match &shared.command {
@@ -55,9 +51,9 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             writes: parse_set_entries(set)?,
         },
         Command::Close(close) if !close.all && close.env.is_none() => Action::Close,
-        Command::Session(session) => match session.command {
-            Some(SessionCommand::List) => Action::SessionList,
-            None => Action::SessionStatus,
+        Command::Instance(instance) => match instance.command {
+            Some(InstanceCommand::List) => Action::InstanceList,
+            None => Action::InstanceStatus,
         },
         Command::Time(time) => match &time.command {
             TimeCommand::Start => Action::TimeStart,
@@ -70,7 +66,11 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             },
             TimeCommand::Status => Action::TimeStatus,
         },
-        Command::Watch(_) | Command::Run(_) | Command::Env(_) | Command::Close(_) => {
+        Command::Load(_)
+        | Command::Watch(_)
+        | Command::Run(_)
+        | Command::Env(_)
+        | Command::Close(_) => {
             return Err(CliError::CommandFailed(
                 "command is handled by the CLI executor".to_string(),
             ));
@@ -104,7 +104,7 @@ fn canonicalize_cli_path(raw_path: &str) -> Result<String, CliError> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-fn parse_arb_id(value: &str) -> Result<u32, CliError> {
+pub(crate) fn parse_arb_id(value: &str) -> Result<u32, CliError> {
     let trimmed = value.trim();
     if let Some(hex) = trimmed
         .strip_prefix("0x")
@@ -235,10 +235,15 @@ mod tests {
         let expected = std::fs::canonicalize(dbc.path()).expect("temp dbc should canonicalize");
         let args = CliArgs {
             daemon: false,
+            bootstrap_instance: false,
+            env_daemon: false,
             json: false,
-            session: "default".to_string(),
+            instance: "default".to_string(),
             libpath: None,
+            load_spec_path: None,
             env_tag: None,
+            env_name: None,
+            env_spec_path: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -258,10 +263,15 @@ mod tests {
     fn can_load_dbc_request_rejects_missing_path() {
         let args = CliArgs {
             daemon: false,
+            bootstrap_instance: false,
+            env_daemon: false,
             json: false,
-            session: "default".to_string(),
+            instance: "default".to_string(),
             libpath: None,
+            load_spec_path: None,
             env_tag: None,
+            env_name: None,
+            env_spec_path: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -281,22 +291,25 @@ mod tests {
     }
 
     #[test]
-    fn load_request_preserves_env_tag() {
+    fn load_request_is_handled_by_cli_executor() {
         let args = CliArgs {
             daemon: false,
+            bootstrap_instance: false,
+            env_daemon: false,
             json: false,
-            session: "default".to_string(),
+            instance: "default".to_string(),
             libpath: None,
+            load_spec_path: None,
             env_tag: Some("bench".to_string()),
+            env_name: None,
+            env_spec_path: None,
             config: None,
             command: Some(Command::Load(LoadArgs {
-                libpath: "/tmp/libsim.dylib".to_string(),
+                libpath: Some("/tmp/libsim.dylib".to_string()),
+                flash: Vec::new(),
             })),
         };
-        let request = to_request(&args).expect("load request should build");
-        let Action::Load { env_tag, .. } = request.action else {
-            panic!("expected load action");
-        };
-        assert_eq!(env_tag.as_deref(), Some("bench"));
+        let err = to_request(&args).expect_err("load request should be rejected");
+        assert!(matches!(err, CliError::CommandFailed(_)));
     }
 }

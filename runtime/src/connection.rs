@@ -1,5 +1,7 @@
 use crate::daemon::error::DaemonError;
 use crate::daemon::lifecycle::{bootstrap_daemon, ensure_daemon_running, socket_path};
+use crate::envd::error::EnvDaemonError;
+use crate::envd::lifecycle::{ensure_env_running, socket_path as env_socket_path};
 use crate::protocol::{Action, Request, Response};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -10,6 +12,8 @@ use tokio::time::{Duration, sleep, timeout};
 pub enum ConnectionError {
     #[error(transparent)]
     Daemon(#[from] DaemonError),
+    #[error(transparent)]
+    EnvDaemon(#[from] EnvDaemonError),
     #[error("connection timeout")]
     Timeout,
     #[error("connection error: {0}")]
@@ -22,7 +26,16 @@ pub enum ConnectionError {
 
 pub async fn send_request(session: &str, request: &Request) -> Result<Response, ConnectionError> {
     SessionConnector.prepare(session, request).await?;
-    RequestTransport::default().send(session, request).await
+    RequestTransport::default()
+        .send_to_socket(&socket_path(session), request)
+        .await
+}
+
+pub async fn send_env_request(env: &str, request: &Request) -> Result<Response, ConnectionError> {
+    EnvConnector.prepare(env).await?;
+    RequestTransport::default()
+        .send_to_socket(&env_socket_path(env), request)
+        .await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,8 +60,11 @@ impl Default for RequestTransport {
 }
 
 impl RequestTransport {
-    async fn send(self, session: &str, request: &Request) -> Result<Response, ConnectionError> {
-        let socket = socket_path(session);
+    async fn send_to_socket(
+        self,
+        socket: &std::path::Path,
+        request: &Request,
+    ) -> Result<Response, ConnectionError> {
         let payload = {
             let mut line = serde_json::to_string(request)?;
             line.push('\n');
@@ -101,11 +117,21 @@ struct SessionConnector;
 impl SessionConnector {
     async fn prepare(self, session: &str, request: &Request) -> Result<(), ConnectionError> {
         match &request.action {
-            Action::Load { libpath, env_tag } => {
-                bootstrap_daemon(session, libpath, env_tag.as_deref()).await?;
+            Action::Load { load_spec } => {
+                bootstrap_daemon(session, load_spec).await?;
             }
             _ => ensure_daemon_running(session).await?,
         }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EnvConnector;
+
+impl EnvConnector {
+    async fn prepare(self, env: &str) -> Result<(), ConnectionError> {
+        ensure_env_running(env).await?;
         Ok(())
     }
 }

@@ -1,16 +1,11 @@
 use crate::daemon::error::DaemonError;
+use crate::load::{LoadSpec, write_load_spec};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
-
-#[derive(Debug, Clone, Default)]
-pub struct DaemonBootstrap {
-    pub libpath: String,
-    pub env_tag: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionRegistry;
@@ -37,24 +32,16 @@ pub fn meta_path(session: &str) -> PathBuf {
     session_root().join(format!("{session}.meta"))
 }
 
+pub fn bootstrap_dir() -> PathBuf {
+    session_root().join("bootstrap")
+}
+
 pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
     SessionRegistry.ensure_running(session).await
 }
 
-pub async fn bootstrap_daemon(
-    session: &str,
-    libpath: &str,
-    env_tag: Option<&str>,
-) -> Result<(), DaemonError> {
-    SessionRegistry
-        .bootstrap(
-            session,
-            &DaemonBootstrap {
-                libpath: libpath.to_string(),
-                env_tag: env_tag.map(ToString::to_string),
-            },
-        )
-        .await
+pub async fn bootstrap_daemon(session: &str, load_spec: &LoadSpec) -> Result<(), DaemonError> {
+    SessionRegistry.bootstrap(session, load_spec).await
 }
 
 impl SessionRegistry {
@@ -67,22 +54,24 @@ impl SessionRegistry {
         Err(DaemonError::NotRunning(session.to_string()))
     }
 
-    pub async fn bootstrap(
-        self,
-        session: &str,
-        bootstrap: &DaemonBootstrap,
-    ) -> Result<(), DaemonError> {
+    pub async fn bootstrap(self, session: &str, load_spec: &LoadSpec) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
+        std::fs::create_dir_all(bootstrap_dir())?;
         let socket = socket_path(session);
         if can_connect(&socket).await {
             return Err(DaemonError::AlreadyRunning(session.to_string()));
         }
-        let mut child = self.spawn_daemon(session, bootstrap)?;
+        let bootstrap_path =
+            bootstrap_dir().join(format!("{session}-{}.json", uuid::Uuid::new_v4()));
+        write_load_spec(&bootstrap_path, load_spec)
+            .map_err(|err| DaemonError::Request(err.to_string()))?;
+        let mut child = self.spawn_daemon(session, &bootstrap_path)?;
 
         let timeout = Duration::from_secs(5);
         let mut waited = Duration::from_millis(0);
         while waited < timeout {
             if can_connect(&socket).await {
+                let _ = std::fs::remove_file(&bootstrap_path);
                 return Ok(());
             }
             if let Some(status) = child.try_wait()? {
@@ -90,6 +79,7 @@ impl SessionRegistry {
                 if let Some(mut pipe) = child.stderr.take() {
                     let _ = pipe.read_to_string(&mut stderr);
                 }
+                let _ = std::fs::remove_file(&bootstrap_path);
                 let details = stderr.trim();
                 let message = if details.is_empty() {
                     format!("daemon exited with status {status}")
@@ -101,27 +91,25 @@ impl SessionRegistry {
             sleep(Duration::from_millis(100)).await;
             waited += Duration::from_millis(100);
         }
+        let _ = std::fs::remove_file(&bootstrap_path);
         Err(DaemonError::StartupTimeout)
     }
 
     fn spawn_daemon(
         self,
         session: &str,
-        bootstrap: &DaemonBootstrap,
+        bootstrap_path: &Path,
     ) -> Result<std::process::Child, DaemonError> {
         let exe = std::env::current_exe()?;
         let mut command = std::process::Command::new(exe);
         command
             .arg("--daemon")
-            .arg("--session")
+            .arg("--instance")
             .arg(session)
-            .arg("--libpath")
-            .arg(&bootstrap.libpath)
+            .arg("--load-spec-path")
+            .arg(bootstrap_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        if let Some(env_tag) = &bootstrap.env_tag {
-            command.arg("--env-tag").arg(env_tag);
-        }
         let child = command.spawn()?;
         Ok(child)
     }

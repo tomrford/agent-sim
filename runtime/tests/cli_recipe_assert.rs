@@ -36,12 +36,12 @@ steps = [
     .expect("temp config should be writable");
     let config = temp.path().display().to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
 
-    let pass = run_agent(&["--session", &session, "--config", &config, "run", "pass"]);
+    let pass = run_agent(&["--instance", &session, "--config", &config, "run", "pass"]);
     assert!(pass.contains("Steps: 4"), "unexpected pass output: {pass}");
 
-    let fail = run_agent_fail(&["--session", &session, "--config", &config, "run", "fail"]);
+    let fail = run_agent_fail(&["--instance", &session, "--config", &config, "run", "fail"]);
     assert!(
         fail.contains("assertion failed"),
         "expected assertion failure output, got: {fail}"
@@ -51,7 +51,7 @@ steps = [
         "expected signal name in assertion failure, got: {fail}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
@@ -77,12 +77,19 @@ steps = [
     .expect("temp config should be writable");
     let config = temp.path().display().to_string();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let fail = run_agent_fail(&["--session", &session, "--config", &config, "run", "invalid"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let fail = run_agent_fail(&[
+        "--instance",
+        &session,
+        "--config",
+        &config,
+        "run",
+        "invalid",
+    ]);
     assert!(
         fail.contains("explicit tolerance"),
         "expected explicit tolerance failure, got: {fail}"
     );
 
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "close"]);
 }

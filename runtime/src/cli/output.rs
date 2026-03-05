@@ -164,8 +164,53 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Some(ResponseData::CanSend { bus, arb_id, len }) => {
             println!("Sent frame on {bus}: id=0x{arb_id:X} len={len}");
         }
+        Some(ResponseData::CanInspect { bus, frames }) => {
+            println!("Bus: {bus}");
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["Arb ID", "Len", "Flags", "Data"]);
+            for frame in frames {
+                table.add_row(vec![
+                    format!("0x{:X}", frame.arb_id),
+                    frame.len.to_string(),
+                    format!("0x{:02X}", frame.flags),
+                    frame.data_hex.clone(),
+                ]);
+            }
+            println!("{table}");
+        }
+        Some(ResponseData::CanSchedules { schedules }) => {
+            let mut table = Table::new();
+            table.load_preset(UTF8_HORIZONTAL_ONLY).set_header(vec![
+                "Job",
+                "Bus",
+                "Arb ID",
+                "Data",
+                "Flags",
+                "Every (ticks)",
+                "Next due",
+                "Enabled",
+            ]);
+            for schedule in schedules {
+                table.add_row(vec![
+                    schedule.job_id.clone(),
+                    schedule.bus.clone(),
+                    format!("0x{:X}", schedule.arb_id),
+                    schedule.data_hex.clone(),
+                    format!("0x{:02X}", schedule.flags),
+                    schedule.every_ticks.to_string(),
+                    schedule.next_due_tick.to_string(),
+                    schedule.enabled.to_string(),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::DbcLoaded { bus, signal_count }) => {
             println!("Loaded DBC for {bus}: {signal_count} signals");
+        }
+        Some(ResponseData::WorkerStep { can_tx }) => {
+            println!("Worker CAN TX batches: {}", can_tx.len());
         }
         Some(ResponseData::SharedChannels { channels }) => {
             let mut table = Table::new();
@@ -214,27 +259,38 @@ pub fn print_response(response: &Response, json_mode: bool) {
             println!("Dry run: {dry_run}");
             println!("Steps: {steps_executed}");
             for step in steps {
-                let session = step.session.as_deref().unwrap_or("-");
-                println!("- [{:?}] {} {}", step.kind, session, step.detail);
+                let instance = step.instance.as_deref().unwrap_or("-");
+                println!("- [{:?}] {} {}", step.kind, instance, step.detail);
             }
         }
-        Some(ResponseData::SessionStatus {
-            session,
+        Some(ResponseData::EnvStatus {
+            env,
+            running,
+            instance_count,
+            tick_duration_us,
+        }) => {
+            println!("Env: {env}");
+            println!("Running: {running}");
+            println!("Instances: {instance_count}");
+            println!("Tick(us): {tick_duration_us}");
+        }
+        Some(ResponseData::InstanceStatus {
+            instance,
             socket_path,
             running,
             env,
         }) => {
-            println!("Session: {session}");
+            println!("Instance: {instance}");
             println!("Socket: {socket_path}");
             println!("Running: {running}");
             println!("Env: {}", env.clone().unwrap_or_else(|| "-".to_string()));
         }
-        Some(ResponseData::SessionList { sessions }) => {
+        Some(ResponseData::InstanceList { instances }) => {
             let mut table = Table::new();
             table
                 .load_preset(UTF8_HORIZONTAL_ONLY)
-                .set_header(vec!["Session", "Running", "Env", "Socket"]);
-            for item in sessions {
+                .set_header(vec!["Instance", "Running", "Env", "Socket"]);
+            for item in instances {
                 table.add_row(vec![
                     item.name.clone(),
                     item.running.to_string(),

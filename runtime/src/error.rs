@@ -2,6 +2,7 @@ use crate::cli::error::CliError;
 use crate::config::error::ConfigError;
 use crate::connection::ConnectionError;
 use crate::daemon::error::DaemonError;
+use crate::envd::error::EnvDaemonError;
 use crate::protocol::ProtocolError;
 use crate::sim::error::{ProjectError, SimError, TimeError};
 use thiserror::Error;
@@ -16,6 +17,8 @@ pub enum AgentSimError {
     Connection(#[from] ConnectionError),
     #[error(transparent)]
     Daemon(#[from] DaemonError),
+    #[error(transparent)]
+    EnvDaemon(#[from] EnvDaemonError),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error(transparent)]

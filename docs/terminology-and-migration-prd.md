@@ -53,7 +53,7 @@ If migration guidance lags behind implementation, users and future coding agents
 ## Goals
 
 - Prefer `instance` over `session` in user-facing product language
-- Avoid a flag day rename that creates unnecessary churn
+- Land a clean, repo-wide cutover to `instance`
 - Preserve compatibility where practical during transition
 - Clearly define which surfaces move first and which stay stable longer
 - Expand migration docs to reflect the env daemon and dedicated CAN scaffolding direction
@@ -89,15 +89,16 @@ New docs, PRDs, examples, and help text should prefer:
 - `--instance`
 - envs containing `instances`
 
-### Compatibility direction
+### Cutover direction
 
-During migration, support old terminology where needed:
+Land a single preferred surface with no compatibility aliases:
 
-- `--session` remains accepted as an alias
-- `session list` can remain as an alias if command naming changes
-- config may temporarily accept both `sessions` and `instances`
+- `--instance`
+- `instance list`
+- `instances = [...]`
+- `instance = "..."` in recipe/default targeting
 
-The product should guide users toward `instance`, not force everyone to rewrite automation immediately.
+Old `session` / `sessions` terminology should be removed rather than preserved as an alias.
 
 ### Internal code direction
 
@@ -128,26 +129,18 @@ When old terminology must be mentioned, use explicit compatibility wording such 
 
 - "instance (currently called `session` in some CLI surfaces)"
 
-### Phase 2: CLI aliasing
+### Phase 2: CLI/config cutover
 
-Add user-facing aliases where worthwhile:
+Rename the user-facing surface directly:
 
-- `--instance` alias for `--session`
-- `instance list` alias for `session list`
-- error/help text should prefer `instance`
-
-This phase is about ergonomics, not forced deprecation.
-
-### Phase 3: Config aliasing
-
-If env/config syntax is touched for the env daemon work, consider supporting:
-
+- `--instance`
+- `instance list`
 - `instances = [...]`
-- `sessions = [...]` as a compatibility alias
+- `instance = "..."` in recipe/default targeting
 
-Do not do this unless the parser change is low-risk and justified. Config aliasing is useful, but it is also a source of ambiguity if done carelessly.
+No compatibility aliases.
 
-### Phase 4: Internal renaming over time
+### Phase 3: Internal renaming over time
 
 Only rename internal identifiers when:
 
@@ -216,16 +209,13 @@ For future coding agents:
 
 ## Risks
 
-- partial rename can create temporary inconsistency
-- aliasing can create ambiguity if error/help text is unclear
-- config dual-support can become permanent if not documented carefully
+- temporary mixed terminology during implementation
 - migration docs can still drift if ownership is vague
 
 ## Mitigations
 
 - make `instance` the preferred wording everywhere new
-- explicitly label old terms as compatibility terms
-- avoid unnecessary config aliasing unless it clearly helps
+- finish with one clean terminology pass
 - require doc/demo/test updates in the same workstream as feature delivery
 
 ## Deliverables

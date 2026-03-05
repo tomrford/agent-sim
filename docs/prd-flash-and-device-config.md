@@ -13,7 +13,7 @@ Related:
 `agent-sim` models firmware as shared libraries loaded into per-device runtime processes. Today, startup is driven by the `load` path in the Rust runtime:
 
 1. the CLI builds `Action::Load { libpath, env_tag }`
-2. `runtime/src/connection.rs` bootstraps a session daemon for that library
+2. `runtime/src/connection.rs` bootstraps an instance daemon for that library
 3. `runtime/src/daemon/mod.rs` calls `Project::load(libpath)`
 4. `runtime/src/sim/project.rs` binds symbols, reads metadata, then calls `sim_init()`
 
@@ -26,7 +26,7 @@ This feature also introduces a `device` abstraction in config: a named bundle of
 Terminology note:
 
 - This document prefers `instance` for the running thing and `device` for the reusable definition, following `docs/terminology-and-migration-prd.md`.
-- When referring to current code surfaces, it still uses the repo's existing names such as `session`, `sessions`, and `env_tag`.
+- When referring to current code surfaces, it still uses the repo's existing internal names such as `env_tag`.
 
 ### Non-Goals
 
@@ -45,7 +45,7 @@ Terminology note:
 - **Call ordering**: flash writes happen before `sim_init()`.
 - **Load-path integration**: flash must be threaded through the initial load/bootstrap path, not added as a separate post-load RPC. In current code, the daemon is already bootstrapped and `Project::load(...)` has already run before `Action::Load` reaches the request router.
 - **Ownership boundary**: flash is device-local state. The env daemon work should route a richer load spec to per-device workers, not take ownership of flash as env-scoped runtime state.
-- **Config model**: `[device.<name>]` holds `lib` plus `flash`; `[env.<name>]` references devices for each instance/session entry.
+- **Config model**: `[device.<name>]` holds `lib` plus `flash`; `[env.<name>]` references devices for each instance entry.
 - **File formats (V1)**: Intel HEX, Motorola S-record, and raw binary with explicit base address.
 - **Inline values (V1)**: typed scalar values at explicit addresses, serialized directly from TOML.
 - **DLL/library-side responsibility**: the adapter author owns flash layout inside `Ctx` and implements the address-to-storage mapping in `sim_flash_write`.
@@ -252,7 +252,7 @@ This parser layer should be reusable from both standalone `load` flows and env/d
 Today, `runtime/src/config/recipe.rs` models env membership as:
 
 ```rust
-pub struct EnvSession {
+pub struct EnvInstance {
     pub name: String,
     pub lib: String,
 }
@@ -287,8 +287,7 @@ lib = "./zig-out/lib/libecu2.dylib"
 # -- Environments -----------------------------------------------------------
 
 [env.bench]
-# Current code uses `sessions`; docs use "instance" in prose.
-sessions = [
+instances = [
     { name = "ecu1-a", device = "ecu1" },
     { name = "ecu2-a", device = "ecu2" },
 ]
@@ -314,13 +313,13 @@ V1 serializes inline values as little-endian bytes.
 
 - Existing env entries with direct `lib = "..."` should keep working.
 - `device` and `lib` on the same entry are mutually exclusive.
-- `sessions` remains the concrete parser field unless the terminology work adds an `instances` alias in the same stream.
+- `instances` is the concrete parser field.
 
 Still-valid direct form:
 
 ```toml
 [env.simple]
-sessions = [
+instances = [
     { name = "default", lib = "./my_lib.dylib" },
 ]
 ```
@@ -353,7 +352,7 @@ pub enum FlashBlockDef {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvSession {
+pub struct EnvInstance {
     pub name: String,
     pub lib: Option<String>,
     pub device: Option<String>,
@@ -396,7 +395,7 @@ Key point: flashing belongs inside device load. It should not become an env-owne
 - [ ] `device` map added to config model
 - [ ] `FlashBlockDef` enum for file and inline variants
 - [ ] Inline value serialization to little-endian bytes
-- [ ] `EnvSession` updated to allow `device` or `lib`
+- [ ] `EnvInstance` updated to allow `device` or `lib`
 - [ ] Validation for `device`/`lib` mutual exclusivity and missing device references
 - [ ] Flash file paths resolved relative to config source path
 - [ ] Env startup builds a load spec instead of sending post-load flash RPCs
@@ -453,7 +452,7 @@ The repeatable `--flash` flag accepts:
 
 4. **Inline endianness**: V1 assumes little-endian serialization. Recommendation: keep fixed little-endian behavior in V1.
 
-5. **`sessions` vs `instances` config spelling**: should config aliasing land here or in separate terminology work? Recommendation: do not block flash/device work on aliasing; keep `sessions` initially unless aliasing is low-risk.
+5. **`instances` config spelling**: use `instances` consistently in config and examples.
 
 ---
 

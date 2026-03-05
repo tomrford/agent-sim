@@ -21,9 +21,10 @@ extern "C" {
  * Typical host flow:
  * 1. sim_get_tick_duration_us()
  * 2. sim_get_signal_count() + sim_get_signals()
- * 3. sim_init()
- * 4. loop: sim_write_val() -> sim_tick() -> sim_read_val()
- * 5. sim_reset() as needed
+ * 3. optional sim_flash_write() calls
+ * 4. sim_init()
+ * 5. loop: sim_write_val() -> sim_tick() -> sim_read_val()
+ * 6. sim_reset() as needed
  *
  * Threading contract:
  * - Calls must be serialized per loaded DLL.
@@ -172,6 +173,20 @@ SimStatus sim_get_signals(SimSignalDesc *out, uint32_t capacity,
  * @brief Get fixed tick duration in microseconds for this DLL build.
  */
 SimStatus sim_get_tick_duration_us(uint32_t *out_tick_us);
+
+/**
+ * @brief Write a raw flash payload into the project before sim_init().
+ *
+ * Optional export:
+ * - host calls this only when flash regions are configured
+ * - host applies writes in the order provided by config/CLI
+ *
+ * Rules:
+ * - overlapping writes are applied in call order (last write wins)
+ * - len == 0 is allowed and should return SIM_OK
+ * - out-of-range writes should return SIM_ERR_INVALID_ARG
+ */
+SimStatus sim_flash_write(uint32_t base_addr, const uint8_t *data, uint32_t len);
 
 /**
  * @brief CAN frame structure for classic CAN and CAN FD.

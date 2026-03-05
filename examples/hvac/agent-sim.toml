@@ -5,11 +5,16 @@ speed = 1.0
 [defaults.load]
 lib = "./zig-out/lib/libsim_hvac_example.dylib"
 
+# -- Devices ------------------------------------------------------------------
+
+[device.hvac]
+lib = "./zig-out/lib/libsim_hvac_example.dylib"
+
 # -- Envs ---------------------------------------------------------------------
 
 [env.single-node]
-sessions = [
-  { name = "hvac-single", lib = "./zig-out/lib/libsim_hvac_example.dylib" },
+instances = [
+  { name = "hvac-single", device = "hvac" },
 ]
 
 # -- Recipes ------------------------------------------------------------------

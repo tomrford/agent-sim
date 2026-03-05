@@ -1,47 +1,54 @@
 mod common;
 
 use common::{ensure_fixtures_built, run_agent, run_agent_fail, template_lib_path, unique_session};
+use std::io::Write;
 
 #[test]
-fn can_buses_lists_declared_template_buses() {
+fn instance_can_commands_are_rejected_in_favor_of_env_can() {
     ensure_fixtures_built();
-    let session = unique_session("can-buses");
+    let session = unique_session("can-reject");
     let libpath = template_lib_path();
-    let libpath = libpath
-        .to_str()
-        .expect("template path should be valid utf8")
-        .to_string();
+    let libpath = libpath.to_string_lossy().into_owned();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let buses = run_agent(&["--session", &session, "can", "buses"]);
-    assert!(buses.contains("internal"), "expected internal bus: {buses}");
-    assert!(buses.contains("external"), "expected external bus: {buses}");
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let err = run_agent_fail(&["--instance", &session, "can", "buses"]);
+    assert!(
+        err.contains("CAN is env-owned"),
+        "expected env-owned CAN rejection, got: {err}"
+    );
+    let _ = run_agent(&["--instance", &session, "close"]);
 }
 
 #[test]
-fn can_send_requires_bus_attachment() {
+fn env_can_buses_reports_env_owned_topology() {
     ensure_fixtures_built();
-    let session = unique_session("can-send");
-    let libpath = template_lib_path();
-    let libpath = libpath
-        .to_str()
-        .expect("template path should be valid utf8")
-        .to_string();
+    let session = unique_session("env-can");
+    let env_name = unique_session("env-can");
+    let libpath = template_lib_path().to_string_lossy().into_owned();
 
-    let _ = run_agent(&["--session", &session, "load", &libpath]);
-    let err = run_agent_fail(&[
-        "--session",
-        &session,
-        "can",
-        "send",
-        "internal",
-        "0x123",
-        "0102",
+    let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+instances = [
+  {{ name = "{session}", lib = "{libpath}" }},
+]
+"#
+    )
+    .expect("env config should be writable");
+
+    let _ = run_agent(&[
+        "--config",
+        &cfg.path().display().to_string(),
+        "env",
+        "start",
+        &env_name,
     ]);
+    let buses = run_agent(&["env", "can", &env_name, "buses"]);
     assert!(
-        err.contains("is not attached"),
-        "expected unattached bus error, got: {err}"
+        buses.contains("Bus") || buses.contains("ID"),
+        "expected env CAN buses output, got: {buses}"
     );
-    let _ = run_agent(&["--session", &session, "close"]);
+    let _ = run_agent(&["close", "--env", &env_name]);
 }

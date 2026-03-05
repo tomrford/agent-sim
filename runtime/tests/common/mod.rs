@@ -93,7 +93,15 @@ fn run_shell(command: &str) {
 }
 
 fn test_agent_sim_home() -> PathBuf {
-    let path = PathBuf::from("/tmp/agent-sim-tests");
+    let test_bin = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|value| value.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "agent-sim-tests".to_string());
+    let short = test_bin.chars().take(12).collect::<String>();
+    let path = PathBuf::from(format!("/tmp/asim-{short}"));
     let _ = std::fs::create_dir_all(&path);
     path
 }
