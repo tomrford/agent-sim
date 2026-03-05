@@ -225,6 +225,44 @@ SimStatus sim_can_rx(uint32_t bus_id, const SimCanFrame *frames, uint32_t count)
 SimStatus sim_can_tx(uint32_t bus_id, SimCanFrame *out, uint32_t capacity,
                      uint32_t *out_written);
 
+/**
+ * @brief Shared-state channel descriptor.
+ */
+typedef struct {
+  uint32_t id;
+  const char *name;
+  uint32_t slot_count;
+} SimSharedDesc;
+
+/**
+ * @brief Shared-state slot payload.
+ */
+typedef struct {
+  uint32_t slot_id;
+  SimType type;
+  SimValue value;
+} SimSharedSlot;
+
+/**
+ * @brief Enumerate shared-state channels exposed by the DLL.
+ *
+ * Optional export: if any sim_shared_* symbol is exported, all must be exported.
+ */
+SimStatus sim_shared_get_channels(SimSharedDesc *out, uint32_t capacity,
+                                  uint32_t *out_written);
+
+/**
+ * @brief Read inbound shared-state snapshot before sim_tick().
+ */
+SimStatus sim_shared_read(uint32_t channel_id, const SimSharedSlot *slots,
+                          uint32_t count);
+
+/**
+ * @brief Collect outbound shared-state snapshot after sim_tick().
+ */
+SimStatus sim_shared_write(uint32_t channel_id, SimSharedSlot *out,
+                           uint32_t capacity, uint32_t *out_written);
+
 #ifdef __cplusplus
 }
 #endif

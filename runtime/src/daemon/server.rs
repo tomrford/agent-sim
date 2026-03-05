@@ -1,8 +1,8 @@
 use crate::can::CanSocket;
 use crate::can::dbc::{DbcBusOverlay, decode_signal, encode_signal, frame_key_from_frame};
 use crate::protocol::{
-    Action, CanBusData, Request, Response, ResponseData, SessionInfoData, SignalData,
-    SignalValueData, parse_duration_us,
+    Action, CanBusData, Request, Response, ResponseData, SessionInfoData, SharedChannelData,
+    SignalData, SignalValueData, parse_duration_us,
 };
 use crate::sim::error::SimError;
 use crate::sim::project::Project;
@@ -506,6 +506,19 @@ async fn dispatch_action(action: Action, state: &mut DaemonState) -> Result<Resp
                 bus: bus_name,
                 signal_count,
             })
+        }
+        Action::SharedList => {
+            let channels = state
+                .project
+                .shared_channels()
+                .iter()
+                .map(|channel| SharedChannelData {
+                    id: channel.id,
+                    name: channel.name.clone(),
+                    slot_count: channel.slot_count,
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::SharedChannels { channels })
         }
         Action::CanSend {
             bus_name,

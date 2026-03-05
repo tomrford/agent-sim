@@ -1,7 +1,7 @@
 use crate::sim::error::{ProjectError, SimError};
 use crate::sim::types::{
     SignalMeta, SignalType, SignalValue, SimCanBusDesc, SimCanBusDescRaw, SimCanFrame,
-    SimCanFrameRaw, SimSignalDescRaw, SimValueRaw,
+    SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSignalDescRaw, SimValueRaw,
 };
 use libloading::Library;
 use std::collections::HashMap;
@@ -19,6 +19,11 @@ type SimGetTickDurationUsFn = unsafe extern "C" fn(*mut u32) -> u32;
 type SimCanGetBusesFn = unsafe extern "C" fn(*mut SimCanBusDescRaw, u32, *mut u32) -> u32;
 type SimCanRxFn = unsafe extern "C" fn(u32, *const SimCanFrameRaw, u32) -> u32;
 type SimCanTxFn = unsafe extern "C" fn(u32, *mut SimCanFrameRaw, u32, *mut u32) -> u32;
+type SimSharedGetChannelsFn = unsafe extern "C" fn(*mut SimSharedDescRaw, u32, *mut u32) -> u32;
+type SimSharedReadFn =
+    unsafe extern "C" fn(u32, *const crate::sim::types::SimSharedSlotRaw, u32) -> u32;
+type SimSharedWriteFn =
+    unsafe extern "C" fn(u32, *mut crate::sim::types::SimSharedSlotRaw, u32, *mut u32) -> u32;
 
 const STATUS_OK: u32 = 0;
 const STATUS_NOT_INITIALIZED: u32 = 1;
@@ -36,6 +41,7 @@ pub struct Project {
     tick_duration_us: u32,
     signals: Vec<SignalMeta>,
     can_buses: Vec<SimCanBusDesc>,
+    shared_channels: Vec<SimSharedDesc>,
     signal_name_to_id: HashMap<String, u32>,
     signal_id_to_index: HashMap<u32, usize>,
     sim_reset: SimResetFn,
@@ -82,6 +88,16 @@ impl Project {
             .ok()
             .map(|symbol| *symbol);
         let sim_can_tx = unsafe { library.get::<SimCanTxFn>(b"sim_can_tx\0") }
+            .ok()
+            .map(|symbol| *symbol);
+        let sim_shared_get_channels =
+            unsafe { library.get::<SimSharedGetChannelsFn>(b"sim_shared_get_channels\0") }
+                .ok()
+                .map(|symbol| *symbol);
+        let sim_shared_read = unsafe { library.get::<SimSharedReadFn>(b"sim_shared_read\0") }
+            .ok()
+            .map(|symbol| *symbol);
+        let sim_shared_write = unsafe { library.get::<SimSharedWriteFn>(b"sim_shared_write\0") }
             .ok()
             .map(|symbol| *symbol);
 
@@ -186,6 +202,17 @@ impl Project {
             }
         };
 
+        let shared_channels = match (sim_shared_get_channels, sim_shared_read, sim_shared_write) {
+            (None, None, None) => Vec::new(),
+            (Some(get_channels), Some(_), Some(_)) => Self::load_shared_channels(get_channels)?,
+            _ => {
+                return Err(ProjectError::InvalidCanExports(
+                        "if any shared-state symbol is exported, sim_shared_get_channels/sim_shared_read/sim_shared_write must all be exported"
+                            .to_string(),
+                    ));
+            }
+        };
+
         let signal_name_to_id = signals
             .iter()
             .map(|s| (s.name.clone(), s.id))
@@ -201,6 +228,7 @@ impl Project {
             tick_duration_us,
             signals,
             can_buses,
+            shared_channels,
             signal_name_to_id,
             signal_id_to_index,
             sim_reset,
@@ -225,6 +253,10 @@ impl Project {
 
     pub fn can_buses(&self) -> &[SimCanBusDesc] {
         &self.can_buses
+    }
+
+    pub fn shared_channels(&self) -> &[SimSharedDesc] {
+        &self.shared_channels
     }
 
     pub fn signal_by_id(&self, id: u32) -> Option<&SignalMeta> {
@@ -389,6 +421,52 @@ impl Project {
                         bitrate: entry.bitrate,
                         bitrate_data: entry.bitrate_data,
                         fd_capable: (entry.flags & 0x01) != 0 && entry.bitrate_data > 0,
+                    })
+                })
+                .collect();
+        }
+    }
+
+    fn load_shared_channels(
+        sim_shared_get_channels: SimSharedGetChannelsFn,
+    ) -> Result<Vec<SimSharedDesc>, ProjectError> {
+        let mut capacity = 4_u32;
+        loop {
+            let mut raw = vec![
+                SimSharedDescRaw {
+                    id: 0,
+                    name: std::ptr::null(),
+                    slot_count: 0,
+                };
+                capacity as usize
+            ];
+            let mut written = 0_u32;
+            let status = unsafe {
+                sim_shared_get_channels(raw.as_mut_ptr(), capacity, &mut written as *mut u32)
+            };
+            if status == STATUS_BUFFER_TOO_SMALL {
+                capacity = capacity.saturating_mul(2).max(2);
+                continue;
+            }
+            if status != STATUS_OK {
+                return Err(ProjectError::LibraryLoad(format!(
+                    "sim_shared_get_channels failed with status {status}"
+                )));
+            }
+            raw.truncate(written as usize);
+            return raw
+                .into_iter()
+                .map(|entry| {
+                    if entry.name.is_null() {
+                        return Err(ProjectError::InvalidCanMetadata);
+                    }
+                    let name = unsafe { CStr::from_ptr(entry.name) }
+                        .to_string_lossy()
+                        .to_string();
+                    Ok(SimSharedDesc {
+                        id: entry.id,
+                        name,
+                        slot_count: entry.slot_count,
                     })
                 })
                 .collect();

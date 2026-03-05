@@ -58,6 +58,7 @@ pub enum Action {
         bus_name: String,
         path: String,
     },
+    SharedList,
     CanSend {
         bus_name: String,
         arb_id: u32,
@@ -147,6 +148,9 @@ pub enum ResponseData {
         bus: String,
         signal_count: usize,
     },
+    SharedChannels {
+        channels: Vec<SharedChannelData>,
+    },
     WatchSamples {
         samples: Vec<WatchSampleData>,
     },
@@ -215,6 +219,13 @@ pub struct CanBusData {
     pub bitrate_data: u32,
     pub fd_capable: bool,
     pub attached_iface: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedChannelData {
+    pub id: u32,
+    pub name: String,
+    pub slot_count: u32,
 }
 
 pub fn parse_duration_us(input: &str) -> Result<u64, ProtocolError> {

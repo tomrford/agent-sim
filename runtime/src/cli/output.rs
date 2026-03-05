@@ -145,6 +145,20 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Some(ResponseData::DbcLoaded { bus, signal_count }) => {
             println!("Loaded DBC for {bus}: {signal_count} signals");
         }
+        Some(ResponseData::SharedChannels { channels }) => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["ID", "Channel", "Slots"]);
+            for channel in channels {
+                table.add_row(vec![
+                    channel.id.to_string(),
+                    channel.name.clone(),
+                    channel.slot_count.to_string(),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::WatchSamples { samples }) => {
             for sample in samples {
                 println!(

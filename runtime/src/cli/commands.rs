@@ -1,4 +1,6 @@
-use crate::cli::args::{CanCommand, CliArgs, Command, SessionCommand, SetArgs, TimeCommand};
+use crate::cli::args::{
+    CanCommand, CliArgs, Command, SessionCommand, SetArgs, SharedCommand, TimeCommand,
+};
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
 use std::collections::BTreeMap;
@@ -13,6 +15,9 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         },
         Command::Info => Action::Info,
         Command::Signals => Action::Signals,
+        Command::Shared(shared) => match &shared.command {
+            SharedCommand::List => Action::SharedList,
+        },
         Command::Can(can) => match &can.command {
             CanCommand::Buses => Action::CanBuses,
             CanCommand::Attach { bus, vcan_iface } => Action::CanAttach {

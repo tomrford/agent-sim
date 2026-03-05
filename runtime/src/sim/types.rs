@@ -271,3 +271,26 @@ pub struct SimCanBusDesc {
     pub bitrate_data: u32,
     pub fd_capable: bool,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SimSharedDescRaw {
+    pub id: u32,
+    pub name: *const c_char,
+    pub slot_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SimSharedSlotRaw {
+    pub slot_id: u32,
+    pub signal_type: u32,
+    pub value: SimValueRaw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimSharedDesc {
+    pub id: u32,
+    pub name: String,
+    pub slot_count: u32,
+}

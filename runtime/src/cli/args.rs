@@ -46,6 +46,7 @@ pub enum Command {
     Info,
     Signals,
     Can(CanArgs),
+    Shared(SharedArgs),
     Reset,
     Get(GetArgs),
     Set(SetArgs),
@@ -109,6 +110,17 @@ pub enum CanCommand {
         #[arg(long)]
         flags: Option<u8>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct SharedArgs {
+    #[command(subcommand)]
+    pub command: SharedCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SharedCommand {
+    List,
 }
 
 #[derive(Debug, Subcommand)]
