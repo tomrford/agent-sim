@@ -1,16 +1,15 @@
 use crate::sim::error::{ProjectError, SimError};
-use crate::sim::init::{InitConfig, InitConfigRawScope};
 use crate::sim::project_loader::{decode_owned_cstr, next_capacity, validate_written};
 use crate::sim::types::{
     SignalMeta, SignalType, SignalValue, SimCanBusDesc, SimCanBusDescRaw, SimCanFrame,
-    SimCanFrameRaw, SimInitConfigRaw, SimSharedDesc, SimSharedDescRaw, SimSharedSlot,
-    SimSharedSlotRaw, SimSignalDescRaw, SimValueRaw,
+    SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSharedSlot, SimSharedSlotRaw,
+    SimSignalDescRaw, SimValueRaw,
 };
 use libloading::Library;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-type SimInitFn = unsafe extern "C" fn(*const SimInitConfigRaw) -> u32;
+type SimInitFn = unsafe extern "C" fn() -> u32;
 type SimResetFn = unsafe extern "C" fn() -> u32;
 type SimTickFn = unsafe extern "C" fn() -> u32;
 type SimReadValFn = unsafe extern "C" fn(u32, *mut SimValueRaw) -> u32;
@@ -64,7 +63,7 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn load(libpath: impl AsRef<Path>, init_config: &InitConfig) -> Result<Self, ProjectError> {
+    pub fn load(libpath: impl AsRef<Path>) -> Result<Self, ProjectError> {
         let path = libpath.as_ref().to_path_buf();
         let library =
             unsafe { Library::new(&path) }.map_err(|e| ProjectError::LibraryLoad(e.to_string()))?;
@@ -184,9 +183,7 @@ impl Project {
             }
         };
 
-        let init_config =
-            InitConfigRawScope::new(init_config).map_err(ProjectError::FfiContract)?;
-        let init_status = unsafe { sim_init(init_config.as_ptr()) };
+        let init_status = unsafe { sim_init() };
         if init_status != STATUS_OK {
             return Err(ProjectError::LibraryLoad(format!(
                 "sim_init failed with status {init_status}"

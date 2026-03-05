@@ -32,10 +32,6 @@ pub struct CliArgs {
     #[arg(long, global = true, hide = true)]
     pub env_tag: Option<String>,
 
-    /// Internal JSON-encoded init config for daemon startup
-    #[arg(long, global = true, hide = true)]
-    pub init_config_json: Option<String>,
-
     /// Config file path
     #[arg(long, global = true, env = "AGENT_SIM_CONFIG")]
     pub config: Option<String>,
@@ -65,8 +61,6 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct LoadArgs {
     pub libpath: String,
-    #[arg(long = "init", value_name = "KEY=VALUE")]
-    pub init: Vec<String>,
 }
 
 #[derive(Debug, Args)]

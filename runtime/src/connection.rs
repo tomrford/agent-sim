@@ -1,7 +1,6 @@
 use crate::daemon::error::DaemonError;
 use crate::daemon::lifecycle::{bootstrap_daemon, ensure_daemon_running, socket_path};
 use crate::protocol::{Action, Request, Response};
-use crate::sim::init::InitConfig;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -102,21 +101,8 @@ struct SessionConnector;
 impl SessionConnector {
     async fn prepare(self, session: &str, request: &Request) -> Result<(), ConnectionError> {
         match &request.action {
-            Action::Load {
-                libpath,
-                env_tag,
-                init,
-            } => {
-                let init_config_json = serde_json::to_string(&InitConfig {
-                    entries: init.clone(),
-                })?;
-                bootstrap_daemon(
-                    session,
-                    libpath,
-                    env_tag.as_deref(),
-                    Some(init_config_json.as_str()),
-                )
-                .await?;
+            Action::Load { libpath, env_tag } => {
+                bootstrap_daemon(session, libpath, env_tag.as_deref()).await?;
             }
             _ => ensure_daemon_running(session).await?,
         }

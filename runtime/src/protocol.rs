@@ -1,4 +1,3 @@
-use crate::sim::init::InitEntry;
 use crate::sim::types::{SignalType, SignalValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,11 +27,6 @@ pub enum Action {
     Load {
         libpath: String,
         env_tag: Option<String>,
-        // TODO: Reassess whether this explicit load-time init channel should remain once
-        // flash/device initialization requirements are designed. Keep config-driven setup
-        // recipe/env-based unless the DLL truly needs a pre-tick ABI path.
-        #[serde(default)]
-        init: Vec<InitEntry>,
     },
     Info,
     Signals,

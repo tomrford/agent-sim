@@ -87,31 +87,3 @@ fn hvac_signal_catalog_contains_expected_names() {
 
     let _ = run_agent(&["--session", &session, "close"]);
 }
-
-#[test]
-fn load_init_entries_seed_template_state() {
-    ensure_fixtures_built();
-    let session = unique_session("project-init-config");
-    let libpath = template_lib_path();
-    let libpath = libpath
-        .to_str()
-        .expect("template path should be valid utf8")
-        .to_string();
-
-    let _ = run_agent(&[
-        "--session",
-        &session,
-        "load",
-        &libpath,
-        "--init",
-        "demo.input=4.5",
-    ]);
-    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
-    let output = run_agent(&["--session", &session, "get", "demo.output"]);
-    assert!(
-        output.contains("9"),
-        "expected init-configured output after first tick, got: {output}"
-    );
-
-    let _ = run_agent(&["--session", &session, "close"]);
-}

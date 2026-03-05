@@ -10,7 +10,6 @@ use tokio::time::sleep;
 pub struct DaemonBootstrap {
     pub libpath: String,
     pub env_tag: Option<String>,
-    pub init_config_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -46,7 +45,6 @@ pub async fn bootstrap_daemon(
     session: &str,
     libpath: &str,
     env_tag: Option<&str>,
-    init_config_json: Option<&str>,
 ) -> Result<(), DaemonError> {
     SessionRegistry
         .bootstrap(
@@ -54,7 +52,6 @@ pub async fn bootstrap_daemon(
             &DaemonBootstrap {
                 libpath: libpath.to_string(),
                 env_tag: env_tag.map(ToString::to_string),
-                init_config_json: init_config_json.map(ToString::to_string),
             },
         )
         .await
@@ -124,9 +121,6 @@ impl SessionRegistry {
             .stderr(Stdio::piped());
         if let Some(env_tag) = &bootstrap.env_tag {
             command.arg("--env-tag").arg(env_tag);
-        }
-        if let Some(init_config_json) = &bootstrap.init_config_json {
-            command.arg("--init-config-json").arg(init_config_json);
         }
         let child = command.spawn()?;
         Ok(child)

@@ -107,7 +107,6 @@ async fn start_env_internal(
             Action::Load {
                 libpath: resolved_libpath,
                 env_tag: Some(env_name.to_string()),
-                init: Vec::new(),
             },
         )
         .await?;

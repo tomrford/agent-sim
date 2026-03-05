@@ -38,16 +38,6 @@ pub const SimSignalDesc = extern struct {
     units: ?[*:0]const u8,
 };
 
-pub const SimInitEntry = extern struct {
-    key: [*:0]const u8,
-    value: SimValue,
-};
-
-pub const SimInitConfig = extern struct {
-    entries: [*]const SimInitEntry,
-    count: u32,
-};
-
 pub const SimCanFrame = extern struct {
     arb_id: u32,
     len: u8,

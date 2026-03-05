@@ -116,34 +116,13 @@ typedef struct {
 } SimSignalDesc;
 
 /**
- * @brief Structured init-time configuration entry.
- *
- * Keys are implementation-defined. Signal-like adapters may choose to accept
- * signal names here as init parameters.
- */
-typedef struct {
-  const char *key;
-  SimValue value;
-} SimInitEntry;
-
-/**
- * @brief Optional structured init-time configuration payload.
- *
- * Pass NULL for default startup configuration.
- */
-typedef struct {
-  const SimInitEntry *entries;
-  uint32_t count;
-} SimInitConfig;
-
-/**
  * @brief Initialize simulation state.
  *
  * Implementations must set deterministic startup state.
  * Safe to call multiple times; each call should restore deterministic startup
  * state.
  */
-SimStatus sim_init(const SimInitConfig *config);
+SimStatus sim_init(void);
 
 /**
  * @brief Reset simulation state to deterministic startup state.

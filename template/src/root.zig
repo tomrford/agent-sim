@@ -5,7 +5,6 @@ const sim_types = @import("sim_types.zig");
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
-pub const SimInitConfig = sim_types.SimInitConfig;
 pub const SimCanFrame = sim_types.SimCanFrame;
 pub const SimCanBusDesc = sim_types.SimCanBusDesc;
 pub const SimSharedDesc = sim_types.SimSharedDesc;
@@ -19,9 +18,9 @@ fn requireInitialized() ?*adapter.Ctx {
     return &g_ctx;
 }
 
-pub export fn sim_init(config: ?*const SimInitConfig) SimStatus {
+pub export fn sim_init() SimStatus {
     g_ctx = .{};
-    const status = adapter.init(&g_ctx, config);
+    const status = adapter.init(&g_ctx);
     if (status == .OK) g_initialized = true;
     return status;
 }
@@ -130,7 +129,7 @@ pub export fn sim_shared_write(channel_id: u32, out: ?[*]SimSharedSlot, capacity
 }
 
 test "template sanity" {
-    try std.testing.expect(sim_init(null) == .OK);
+    try std.testing.expect(sim_init() == .OK);
 
     const in = SimValue{ .type = .F32, .data = .{ .f32 = 5.0 } };
     try std.testing.expect(sim_write_val(0, &in) == .OK);

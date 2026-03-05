@@ -5,7 +5,6 @@ const sim_types = @import("sim_types.zig");
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
-pub const SimInitConfig = sim_types.SimInitConfig;
 
 var g_ctx: adapter.Ctx = .{};
 var g_initialized = false;
@@ -15,9 +14,9 @@ fn requireInitialized() ?*adapter.Ctx {
     return &g_ctx;
 }
 
-pub export fn sim_init(config: ?*const SimInitConfig) SimStatus {
+pub export fn sim_init() SimStatus {
     g_ctx = .{};
-    const status = adapter.init(&g_ctx, config);
+    const status = adapter.init(&g_ctx);
     if (status == .OK) g_initialized = true;
     return status;
 }
@@ -69,7 +68,7 @@ pub export fn sim_get_tick_duration_us(out_tick_us: ?*u32) SimStatus {
 }
 
 test "hvac heating cycle" {
-    try std.testing.expect(sim_init(null) == .OK);
+    try std.testing.expect(sim_init() == .OK);
 
     var v = SimValue{ .type = .BOOL, .data = .{ .b = true } };
     try std.testing.expect(sim_write_val(0, &v) == .OK);
@@ -94,7 +93,7 @@ test "hvac heating cycle" {
 }
 
 test "read-only signals reject writes" {
-    try std.testing.expect(sim_init(null) == .OK);
+    try std.testing.expect(sim_init() == .OK);
 
     const v = SimValue{ .type = .U32, .data = .{ .u32 = 0 } };
     try std.testing.expect(sim_write_val(5, &v) == .INVALID_SIGNAL);
@@ -103,7 +102,7 @@ test "read-only signals reject writes" {
 }
 
 test "fault on over-temperature" {
-    try std.testing.expect(sim_init(null) == .OK);
+    try std.testing.expect(sim_init() == .OK);
 
     var v = SimValue{ .type = .BOOL, .data = .{ .b = true } };
     try std.testing.expect(sim_write_val(0, &v) == .OK);
