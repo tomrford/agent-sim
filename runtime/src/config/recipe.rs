@@ -1,5 +1,4 @@
 use crate::config::error::ConfigError;
-use crate::sim::types::SignalValue;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -27,7 +26,8 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecipeDef {
     pub description: Option<String>,
-    pub env: Option<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
     #[serde(default)]
     pub sessions: Vec<String>,
     pub session: Option<String>,
@@ -84,11 +84,10 @@ pub struct EnvDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvSession {
     pub name: String,
     pub lib: String,
-    #[serde(default)]
-    pub init: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,21 +161,4 @@ pub fn toml_value_to_cli_string(value: &toml::Value) -> Result<String, ConfigErr
         }
     };
     Ok(rendered)
-}
-
-pub fn toml_value_to_signal_value(value: &toml::Value) -> Result<SignalValue, ConfigError> {
-    match value {
-        toml::Value::Boolean(v) => Ok(SignalValue::Bool(*v)),
-        toml::Value::Integer(v) if *v >= 0 && *v <= u32::MAX as i64 => {
-            Ok(SignalValue::U32(*v as u32))
-        }
-        toml::Value::Integer(v) if i32::try_from(*v).is_ok() => Ok(SignalValue::I32(*v as i32)),
-        toml::Value::Integer(v) => Err(ConfigError::InvalidRecipeStep(format!(
-            "integer init value {v} is outside supported i32/u32 range"
-        ))),
-        toml::Value::Float(v) => Ok(SignalValue::F64(*v)),
-        _ => Err(ConfigError::InvalidRecipeStep(
-            "unsupported init value type".to_string(),
-        )),
-    }
 }

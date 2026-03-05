@@ -57,16 +57,15 @@ pub(crate) async fn run_recipe_command(
         .recipe(&run.recipe_name)
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
 
-    validate_recipe_preconditions(recipe_def).await?;
-
-    let mut ops = Vec::new();
-    compile_recipe_steps(&recipe_def.steps, &mut ops, None).map_err(CliError::CommandFailed)?;
-
     let default_session = recipe_def
         .session
         .as_deref()
         .unwrap_or(args.session.as_str())
         .to_string();
+    validate_recipe_preconditions(recipe_def, &default_session).await?;
+
+    let mut ops = Vec::new();
+    compile_recipe_steps(&recipe_def.steps, &mut ops, None).map_err(CliError::CommandFailed)?;
     let steps = execute_recipe_ops(&default_session, &ops, run.dry_run).await?;
 
     let response = crate::protocol::Response::ok(
@@ -84,6 +83,7 @@ pub(crate) async fn run_recipe_command(
 
 async fn validate_recipe_preconditions(
     recipe: &crate::config::recipe::RecipeDef,
+    default_session: &str,
 ) -> Result<(), CliError> {
     let sessions = lifecycle::list_sessions()
         .await
@@ -94,26 +94,58 @@ async fn validate_recipe_preconditions(
         .map(|(name, _, _, env)| (name.clone(), env.clone()))
         .collect::<Vec<_>>();
 
-    if let Some(env_name) = &recipe.env {
-        let has_env = running
-            .iter()
-            .any(|(_, env)| env.as_ref() == Some(env_name));
-        if !has_env {
-            return Err(CliError::CommandFailed(format!(
-                "recipe requires env '{env_name}', but no matching running sessions were found"
-            )));
-        }
+    let default_session_env = running
+        .iter()
+        .find(|(name, _)| name == default_session)
+        .map(|(_, env)| env.as_deref());
+    if default_session_env.is_none() {
+        return Err(CliError::CommandFailed(format!(
+            "recipe target session '{default_session}' is not running"
+        )));
+    }
+
+    if !recipe.env.is_empty() {
+        validate_allowed_env(default_session, default_session_env.flatten(), &recipe.env)?;
     }
 
     for session_name in &recipe.sessions {
-        let is_running = running.iter().any(|(name, _)| name == session_name);
-        if !is_running {
+        let session_env = running
+            .iter()
+            .find(|(name, _)| name == session_name)
+            .map(|(_, env)| env.as_deref());
+        if session_env.is_none() {
             return Err(CliError::CommandFailed(format!(
                 "recipe requires session '{session_name}' to be running"
             )));
         }
+        if !recipe.env.is_empty() {
+            validate_allowed_env(session_name, session_env.flatten(), &recipe.env)?;
+        }
     }
     Ok(())
+}
+
+fn validate_allowed_env(
+    session_name: &str,
+    session_env: Option<&str>,
+    allowed_envs: &[String],
+) -> Result<(), CliError> {
+    let allowed = allowed_envs.join(", ");
+    match session_env {
+        Some(env_name)
+            if allowed_envs
+                .iter()
+                .any(|allowed_env| allowed_env == env_name) =>
+        {
+            Ok(())
+        }
+        Some(env_name) => Err(CliError::CommandFailed(format!(
+            "recipe only allowed in envs [{allowed}], but session '{session_name}' is in env '{env_name}'"
+        ))),
+        None => Err(CliError::CommandFailed(format!(
+            "recipe only allowed in envs [{allowed}], but session '{session_name}' is not attached to any env"
+        ))),
+    }
 }
 
 fn compile_recipe_steps(

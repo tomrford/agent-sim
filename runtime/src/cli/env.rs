@@ -2,12 +2,9 @@ use super::{response_error, send_action, send_action_success};
 use crate::cli::args::{CliArgs, EnvArgs, EnvCommand};
 use crate::cli::error::CliError;
 use crate::config::load_config;
-use crate::config::recipe::{
-    EnvCanBus, EnvDef, EnvSession, EnvSharedChannel, toml_value_to_signal_value,
-};
+use crate::config::recipe::{EnvCanBus, EnvDef, EnvSharedChannel};
 use crate::daemon::lifecycle;
 use crate::protocol::Action;
-use crate::sim::init::InitEntry;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -103,12 +100,14 @@ async fn start_env_internal(
     started_sessions: &mut Vec<String>,
 ) -> Result<(), CliError> {
     for session in &env_def.sessions {
+        let resolved_libpath =
+            resolve_config_relative_path(&session.lib, config_base_dir, "shared library")?;
         let response = send_action(
             &session.name,
             Action::Load {
-                libpath: session.lib.clone(),
+                libpath: resolved_libpath,
                 env_tag: Some(env_name.to_string()),
-                init: env_session_init_entries(session)?,
+                init: Vec::new(),
             },
         )
         .await?;
@@ -143,7 +142,7 @@ async fn apply_env_bus_wiring(
         )
         .await?;
         if let Some(dbc_path) = &bus.dbc {
-            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir)?;
+            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir, "DBC")?;
             send_action_success(
                 &session_name,
                 Action::CanLoadDbc {
@@ -160,6 +159,7 @@ async fn apply_env_bus_wiring(
 fn resolve_config_relative_path(
     raw_path: &str,
     config_base_dir: Option<&Path>,
+    kind: &str,
 ) -> Result<String, CliError> {
     let path = Path::new(raw_path);
     let candidate: PathBuf = if path.is_absolute() {
@@ -177,7 +177,7 @@ fn resolve_config_relative_path(
     };
     let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
         CliError::CommandFailed(format!(
-            "failed to resolve DBC path '{raw_path}' to an absolute path (candidate '{}'): {e}",
+            "failed to resolve {kind} path '{raw_path}' to an absolute path (candidate '{}'): {e}",
             candidate.display()
         ))
     })?;
@@ -253,20 +253,6 @@ async fn rollback_started_sessions(started_sessions: &[String]) {
     }
 }
 
-fn env_session_init_entries(session: &EnvSession) -> Result<Vec<InitEntry>, CliError> {
-    session
-        .init
-        .iter()
-        .map(|(key, value)| {
-            Ok(InitEntry {
-                key: key.clone(),
-                value: toml_value_to_signal_value(value)
-                    .map_err(|e| CliError::CommandFailed(e.to_string()))?,
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::resolve_config_relative_path;
@@ -282,8 +268,9 @@ mod tests {
         std::fs::create_dir_all(&dbc_dir).expect("dbc dir should be creatable");
         std::fs::write(&dbc, "VERSION \"\"").expect("dbc file should be writable");
 
-        let resolved = resolve_config_relative_path("dbc/internal.dbc", Some(config_dir.as_path()))
-            .expect("relative DBC path should resolve");
+        let resolved =
+            resolve_config_relative_path("dbc/internal.dbc", Some(config_dir.as_path()), "DBC")
+                .expect("relative DBC path should resolve");
         let expected = std::fs::canonicalize(&dbc)
             .expect("dbc should canonicalize")
             .to_string_lossy()
@@ -299,6 +286,7 @@ mod tests {
         let resolved = resolve_config_relative_path(
             &absolute.to_string_lossy(),
             Some(Path::new("/tmp/unused")),
+            "DBC",
         )
         .expect("absolute path should resolve");
         let expected = std::fs::canonicalize(&absolute)
@@ -311,7 +299,7 @@ mod tests {
     #[test]
     fn resolve_config_relative_path_rejects_missing_file() {
         let temp = tempfile::tempdir().expect("tempdir should be creatable");
-        let err = resolve_config_relative_path("missing.dbc", Some(temp.path()))
+        let err = resolve_config_relative_path("missing.dbc", Some(temp.path()), "DBC")
             .expect_err("missing DBC should fail early");
         let CliError::CommandFailed(message) = err else {
             panic!("expected command failure");

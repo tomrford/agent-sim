@@ -97,3 +97,104 @@ steps = [{{ step = "20us" }}]
 
     let _ = run_agent(&["--session", &session_a, "close"]);
 }
+
+#[test]
+fn recipe_env_whitelist_requires_target_session_env() {
+    ensure_fixtures_built();
+    let session = unique_session("recipe-env-session");
+    let env_name = unique_session("recipe-env");
+    let other_env = unique_session("recipe-other-env");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+sessions = [
+  {{ name = "{session}", lib = "{libpath}" }},
+]
+
+[recipe.allowed]
+env = ["{env_name}"]
+steps = [{{ step = "20us" }}]
+
+[recipe.blocked]
+env = ["{other_env}"]
+steps = [{{ step = "20us" }}]
+"#
+    )
+    .expect("recipe config should be writable");
+    let cfg_path = cfg.path().display().to_string();
+
+    let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
+    let _ = run_agent(&[
+        "--session",
+        &session,
+        "--config",
+        &cfg_path,
+        "run",
+        "allowed",
+    ]);
+
+    let err = run_agent_fail(&[
+        "--session",
+        &session,
+        "--config",
+        &cfg_path,
+        "run",
+        "blocked",
+    ]);
+    assert!(
+        err.contains("only allowed in envs"),
+        "unexpected error: {err}"
+    );
+    assert!(err.contains(&other_env), "unexpected error: {err}");
+
+    let _ = run_agent(&["close", "--env", &env_name]);
+}
+
+#[test]
+fn recipe_env_whitelist_rejects_sessions_without_env() {
+    ensure_fixtures_built();
+    let session = unique_session("recipe-no-env");
+    let env_name = unique_session("recipe-env");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--session", &session, "load", &libpath]);
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
+    write!(
+        cfg,
+        r#"
+[recipe.allowed]
+env = ["{env_name}"]
+steps = [{{ step = "20us" }}]
+"#
+    )
+    .expect("recipe config should be writable");
+    let cfg_path = cfg.path().display().to_string();
+
+    let err = run_agent_fail(&[
+        "--session",
+        &session,
+        "--config",
+        &cfg_path,
+        "run",
+        "allowed",
+    ]);
+    assert!(
+        err.contains("is not attached to any env"),
+        "unexpected error: {err}"
+    );
+
+    let _ = run_agent(&["--session", &session, "close"]);
+}

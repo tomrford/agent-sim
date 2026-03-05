@@ -71,7 +71,7 @@ fn close_all_closes_every_running_session() {
 }
 
 #[test]
-fn env_start_applies_init_config_before_first_tick() {
+fn env_start_rejects_unknown_session_fields() {
     ensure_fixtures_built();
     let session = unique_session("env-init");
     let env_name = unique_session("cluster-init");
@@ -94,12 +94,49 @@ sessions = [
     .expect("env config should be writable");
     let cfg_path = cfg.path().display().to_string();
 
+    let err = run_agent_fail(&["--config", &cfg_path, "env", "start", &env_name]);
+    assert!(err.contains("unknown field"), "unexpected error: {err}");
+    assert!(err.contains("init"), "unexpected error: {err}");
+}
+
+#[test]
+fn env_start_resolves_session_lib_relative_to_config_dir() {
+    ensure_fixtures_built();
+    let session = unique_session("env-relative-lib");
+    let env_name = unique_session("cluster-relative-lib");
+    let libpath = template_lib_path();
+    let libname = libpath
+        .file_name()
+        .expect("template library should have a filename")
+        .to_string_lossy()
+        .to_string();
+
+    let temp = tempfile::tempdir().expect("tempdir should be creatable");
+    let config_dir = temp.path().join("cfg");
+    let lib_dir = config_dir.join("libs");
+    std::fs::create_dir_all(&lib_dir).expect("lib dir should be creatable");
+    std::fs::copy(&libpath, lib_dir.join(&libname)).expect("fixture library should copy");
+
+    let cfg_path = config_dir.join("agent-sim.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"
+[env.{env_name}]
+sessions = [
+  {{ name = "{session}", lib = "./libs/{libname}" }},
+]
+"#
+        ),
+    )
+    .expect("env config should be writable");
+    let cfg_path = cfg_path.display().to_string();
+
     let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
-    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
-    let output = run_agent(&["--session", &session, "get", "demo.output"]);
+    let status = run_agent(&["--session", &session, "session"]);
     assert!(
-        output.contains("9"),
-        "expected init-configured output after first tick, got: {output}"
+        status.contains("Running: true"),
+        "unexpected session output: {status}"
     );
 
     let _ = run_agent(&["close", "--env", &env_name]);
