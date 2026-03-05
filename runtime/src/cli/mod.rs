@@ -179,6 +179,11 @@ async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<ExitCode, CliE
 async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliError> {
     let config = load_config(args.config.as_deref().map(Path::new))
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    let config_base_dir = config
+        .source_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
     let env_def = config
         .env(env_name)
         .map_err(|e| CliError::CommandFailed(e.to_string()))?
@@ -187,7 +192,13 @@ async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliEr
     ensure_sessions_available(&env_def).await?;
 
     let mut started_sessions = Vec::new();
-    let result = start_env_internal(env_name, &env_def, &mut started_sessions).await;
+    let result = start_env_internal(
+        env_name,
+        &env_def,
+        config_base_dir.as_deref(),
+        &mut started_sessions,
+    )
+    .await;
     if let Err(err) = result {
         rollback_started_sessions(&started_sessions).await;
         return Err(err);
@@ -283,6 +294,7 @@ async fn ensure_sessions_available(env_def: &EnvDef) -> Result<(), CliError> {
 async fn start_env_internal(
     env_name: &str,
     env_def: &EnvDef,
+    config_base_dir: Option<&Path>,
     started_sessions: &mut Vec<String>,
 ) -> Result<(), CliError> {
     for session in &env_def.sessions {
@@ -301,7 +313,7 @@ async fn start_env_internal(
     }
 
     for (bus_name, bus) in &env_def.can {
-        apply_env_bus_wiring(bus_name, bus).await?;
+        apply_env_bus_wiring(bus_name, bus, config_base_dir).await?;
     }
     for (channel_name, channel) in &env_def.shared {
         apply_env_shared_wiring(env_name, channel_name, channel).await?;
@@ -309,7 +321,11 @@ async fn start_env_internal(
     Ok(())
 }
 
-async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), CliError> {
+async fn apply_env_bus_wiring(
+    bus_name: &str,
+    bus: &EnvCanBus,
+    config_base_dir: Option<&Path>,
+) -> Result<(), CliError> {
     for member in &bus.members {
         let (session_name, member_bus_name) = parse_env_member(member, bus_name)?;
         send_action_success(
@@ -321,17 +337,29 @@ async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), Cli
         )
         .await?;
         if let Some(dbc_path) = &bus.dbc {
+            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir);
             send_action_success(
                 &session_name,
                 Action::CanLoadDbc {
                     bus_name: member_bus_name,
-                    path: dbc_path.clone(),
+                    path: resolved_path,
                 },
             )
             .await?;
         }
     }
     Ok(())
+}
+
+fn resolve_config_relative_path(raw_path: &str, config_base_dir: Option<&Path>) -> String {
+    let path = Path::new(raw_path);
+    if path.is_absolute() {
+        return raw_path.to_string();
+    }
+    if let Some(base_dir) = config_base_dir {
+        return base_dir.join(path).to_string_lossy().into_owned();
+    }
+    raw_path.to_string()
 }
 
 async fn apply_env_shared_wiring(
@@ -780,4 +808,29 @@ fn response_error(response: &Response) -> String {
         .error
         .clone()
         .unwrap_or_else(|| "command failed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_config_relative_path;
+    use std::path::Path;
+
+    #[test]
+    fn resolve_config_relative_path_joins_relative_to_config_dir() {
+        let resolved =
+            resolve_config_relative_path("dbc/internal.dbc", Some(Path::new("/tmp/agent-sim")));
+        assert_eq!(resolved, "/tmp/agent-sim/dbc/internal.dbc");
+    }
+
+    #[test]
+    fn resolve_config_relative_path_keeps_absolute_paths() {
+        let absolute = std::env::temp_dir()
+            .join("agent-sim")
+            .join("internal.dbc")
+            .to_string_lossy()
+            .into_owned();
+        let resolved =
+            resolve_config_relative_path(&absolute, Some(Path::new("/tmp/should-not-apply")));
+        assert_eq!(resolved, absolute);
+    }
 }
