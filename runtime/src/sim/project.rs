@@ -1,4 +1,5 @@
 use crate::sim::error::{ProjectError, SimError};
+use crate::sim::project_loader::{decode_owned_cstr, next_capacity, validate_written};
 use crate::sim::types::{
     SignalMeta, SignalType, SignalValue, SimCanBusDesc, SimCanBusDescRaw, SimCanFrame,
     SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSharedSlot, SimSharedSlotRaw,
@@ -6,7 +7,6 @@ use crate::sim::types::{
 };
 use libloading::Library;
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
 type SimInitFn = unsafe extern "C" fn() -> u32;
@@ -144,7 +144,8 @@ impl Project {
                     sim_get_signals(raw.as_mut_ptr(), capacity, &mut written as *mut u32)
                 };
                 if status == STATUS_BUFFER_TOO_SMALL {
-                    capacity = (capacity * 2).max(2);
+                    capacity = next_capacity(capacity, "sim_get_signals")
+                        .map_err(ProjectError::FfiContract)?;
                     continue;
                 }
                 if status != STATUS_OK {
@@ -152,24 +153,21 @@ impl Project {
                         "sim_get_signals failed with status {status}"
                     )));
                 }
-                raw.truncate(written as usize);
+                raw.truncate(
+                    validate_written(written, capacity, "sim_get_signals")
+                        .map_err(ProjectError::FfiContract)?,
+                );
                 break raw
                     .into_iter()
                     .map(|entry| {
-                        let name = if entry.name.is_null() {
-                            return Err(ProjectError::InvalidSignalMetadata);
-                        } else {
-                            unsafe { CStr::from_ptr(entry.name) }
-                                .to_string_lossy()
-                                .to_string()
-                        };
+                        let name = decode_owned_cstr(entry.name, "signal name")
+                            .map_err(|_| ProjectError::InvalidSignalMetadata)?;
                         let units = if entry.units.is_null() {
                             None
                         } else {
                             Some(
-                                unsafe { CStr::from_ptr(entry.units) }
-                                    .to_string_lossy()
-                                    .to_string(),
+                                decode_owned_cstr(entry.units, "signal units")
+                                    .map_err(|_| ProjectError::InvalidSignalMetadata)?,
                             )
                         };
                         let signal_type = SignalType::try_from(entry.signal_type)
@@ -343,10 +341,12 @@ impl Project {
                 self.map_status(status, None, None)?;
                 break;
             }
-            raw_frames.truncate(written as usize);
+            raw_frames.truncate(
+                validate_written(written, capacity, "sim_can_tx").map_err(SimError::FfiContract)?,
+            );
             out.extend(raw_frames.into_iter().map(SimCanFrame::from_raw));
             if status == STATUS_BUFFER_TOO_SMALL {
-                capacity = capacity.saturating_mul(2).max(2);
+                capacity = next_capacity(capacity, "sim_can_tx").map_err(SimError::FfiContract)?;
                 continue;
             }
             break;
@@ -393,10 +393,14 @@ impl Project {
                 self.map_status(status, None, None)?;
                 break;
             }
-            raw_slots.truncate(written as usize);
+            raw_slots.truncate(
+                validate_written(written, capacity, "sim_shared_write")
+                    .map_err(SimError::FfiContract)?,
+            );
             out.extend(raw_slots.into_iter().filter_map(SimSharedSlot::from_raw));
             if status == STATUS_BUFFER_TOO_SMALL {
-                capacity = capacity.saturating_mul(2).max(2);
+                capacity =
+                    next_capacity(capacity, "sim_shared_write").map_err(SimError::FfiContract)?;
                 continue;
             }
             break;
@@ -470,7 +474,8 @@ impl Project {
             let status =
                 unsafe { sim_can_get_buses(raw.as_mut_ptr(), capacity, &mut written as *mut u32) };
             if status == STATUS_BUFFER_TOO_SMALL {
-                capacity = capacity.saturating_mul(2).max(2);
+                capacity = next_capacity(capacity, "sim_can_get_buses")
+                    .map_err(ProjectError::FfiContract)?;
                 continue;
             }
             if status != STATUS_OK {
@@ -478,22 +483,21 @@ impl Project {
                     "sim_can_get_buses failed with status {status}"
                 )));
             }
-            raw.truncate(written as usize);
+            raw.truncate(
+                validate_written(written, capacity, "sim_can_get_buses")
+                    .map_err(ProjectError::FfiContract)?,
+            );
             return raw
                 .into_iter()
                 .map(|entry| {
-                    if entry.name.is_null() {
-                        return Err(ProjectError::InvalidCanMetadata);
-                    }
-                    let name = unsafe { CStr::from_ptr(entry.name) }
-                        .to_string_lossy()
-                        .to_string();
+                    let name = decode_owned_cstr(entry.name, "CAN bus name")
+                        .map_err(|_| ProjectError::InvalidCanMetadata)?;
                     Ok(SimCanBusDesc {
                         id: entry.id,
                         name,
                         bitrate: entry.bitrate,
                         bitrate_data: entry.bitrate_data,
-                        fd_capable: (entry.flags & 0x01) != 0 && entry.bitrate_data > 0,
+                        fd_capable: (entry.flags & 0x01) != 0,
                     })
                 })
                 .collect();
@@ -518,7 +522,8 @@ impl Project {
                 sim_shared_get_channels(raw.as_mut_ptr(), capacity, &mut written as *mut u32)
             };
             if status == STATUS_BUFFER_TOO_SMALL {
-                capacity = capacity.saturating_mul(2).max(2);
+                capacity = next_capacity(capacity, "sim_shared_get_channels")
+                    .map_err(ProjectError::FfiContract)?;
                 continue;
             }
             if status != STATUS_OK {
@@ -526,16 +531,15 @@ impl Project {
                     "sim_shared_get_channels failed with status {status}"
                 )));
             }
-            raw.truncate(written as usize);
+            raw.truncate(
+                validate_written(written, capacity, "sim_shared_get_channels")
+                    .map_err(ProjectError::FfiContract)?,
+            );
             return raw
                 .into_iter()
                 .map(|entry| {
-                    if entry.name.is_null() {
-                        return Err(ProjectError::InvalidSharedMetadata);
-                    }
-                    let name = unsafe { CStr::from_ptr(entry.name) }
-                        .to_string_lossy()
-                        .to_string();
+                    let name = decode_owned_cstr(entry.name, "shared channel name")
+                        .map_err(|_| ProjectError::InvalidSharedMetadata)?;
                     Ok(SimSharedDesc {
                         id: entry.id,
                         name,

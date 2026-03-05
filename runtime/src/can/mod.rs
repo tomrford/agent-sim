@@ -1,8 +1,9 @@
 pub mod dbc;
 
-use crate::sim::types::{
-    CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RTR, SimCanFrame,
-};
+use crate::sim::types::SimCanFrame;
+
+#[cfg(target_os = "linux")]
+use crate::sim::types::{CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RTR};
 
 #[cfg(target_os = "linux")]
 use std::mem::size_of;

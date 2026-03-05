@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum ProjectError {
     #[error("library load failed: {0}")]
     LibraryLoad(String),
+    #[error("FFI contract violation: {0}")]
+    FfiContract(String),
     #[error("missing symbol: {0}")]
     MissingSymbol(&'static str),
     #[error("invalid signal metadata from project")]
@@ -25,6 +27,8 @@ pub enum SimError {
     NotInitialized,
     #[error("invalid argument: {0}")]
     InvalidArg(String),
+    #[error("FFI contract violation: {0}")]
+    FfiContract(String),
     #[error("signal not found: '{0}'")]
     InvalidSignal(String),
     #[error("type mismatch: signal '{name}' expects {expected}, got {actual}")]

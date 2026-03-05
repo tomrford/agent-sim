@@ -170,10 +170,12 @@ mod tests {
 
     #[test]
     fn realtime_poll_delay_scales_with_tick_duration() {
-        let mut engine = TimeEngine::default();
-        engine.state = TimeStateData::Running;
-        engine.speed = 1.0;
-        engine.remainder_us = 0.0;
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 1.0,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
         let delay = engine.realtime_poll_delay(20_000);
         assert!(
             delay >= Duration::from_millis(20),
@@ -183,10 +185,12 @@ mod tests {
 
     #[test]
     fn realtime_poll_delay_is_capped_to_one_second() {
-        let mut engine = TimeEngine::default();
-        engine.state = TimeStateData::Running;
-        engine.speed = 0.001;
-        engine.remainder_us = 0.0;
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 0.001,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
         let delay = engine.realtime_poll_delay(1_000_000);
         assert_eq!(
             delay,

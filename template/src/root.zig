@@ -20,9 +20,9 @@ fn requireInitialized() ?*adapter.Ctx {
 
 pub export fn sim_init() SimStatus {
     g_ctx = .{};
-    adapter.init(&g_ctx);
-    g_initialized = true;
-    return .OK;
+    const status = adapter.init(&g_ctx);
+    if (status == .OK) g_initialized = true;
+    return status;
 }
 
 pub export fn sim_reset() SimStatus {

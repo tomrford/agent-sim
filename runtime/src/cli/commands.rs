@@ -10,8 +10,8 @@ use uuid::Uuid;
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
     let action = match command {
-        Command::Load { libpath } => Action::Load {
-            libpath: libpath.clone(),
+        Command::Load(load) => Action::Load {
+            libpath: load.libpath.clone(),
             env_tag: args.env_tag.clone(),
         },
         Command::Info => Action::Info,
@@ -163,7 +163,7 @@ fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::args::{CanArgs, CliArgs, Command};
+    use crate::cli::args::{CanArgs, CliArgs, Command, LoadArgs};
 
     #[test]
     fn set_parser_accepts_single_pair() {
@@ -278,5 +278,25 @@ mod tests {
             message.contains("failed to resolve DBC path"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn load_request_preserves_env_tag() {
+        let args = CliArgs {
+            daemon: false,
+            json: false,
+            session: "default".to_string(),
+            libpath: None,
+            env_tag: Some("bench".to_string()),
+            config: None,
+            command: Some(Command::Load(LoadArgs {
+                libpath: "/tmp/libsim.dylib".to_string(),
+            })),
+        };
+        let request = to_request(&args).expect("load request should build");
+        let Action::Load { env_tag, .. } = request.action else {
+            panic!("expected load action");
+        };
+        assert_eq!(env_tag.as_deref(), Some("bench"));
     }
 }

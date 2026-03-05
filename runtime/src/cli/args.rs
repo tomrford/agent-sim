@@ -42,7 +42,7 @@ pub struct CliArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Load { libpath: String },
+    Load(LoadArgs),
     Info,
     Signals,
     Can(CanArgs),
@@ -56,6 +56,11 @@ pub enum Command {
     Env(EnvArgs),
     Session(SessionArgs),
     Time(TimeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LoadArgs {
+    pub libpath: String,
 }
 
 #[derive(Debug, Args)]

@@ -53,3 +53,36 @@ steps = [
 
     let _ = run_agent(&["--session", &session, "close"]);
 }
+
+#[test]
+fn recipe_approx_requires_explicit_tolerance() {
+    ensure_fixtures_built();
+    let session = unique_session("recipe-assert-tolerance");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let mut temp = tempfile::NamedTempFile::new().expect("temp config should be creatable");
+    write!(
+        temp,
+        r#"
+[recipe.invalid]
+steps = [
+  {{ assert = {{ signal = "demo.output", approx = 6.0 }} }},
+]
+"#
+    )
+    .expect("temp config should be writable");
+    let config = temp.path().display().to_string();
+
+    let _ = run_agent(&["--session", &session, "load", &libpath]);
+    let fail = run_agent_fail(&["--session", &session, "--config", &config, "run", "invalid"]);
+    assert!(
+        fail.contains("explicit tolerance"),
+        "expected explicit tolerance failure, got: {fail}"
+    );
+
+    let _ = run_agent(&["--session", &session, "close"]);
+}

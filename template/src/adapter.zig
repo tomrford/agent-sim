@@ -1,7 +1,6 @@
 const sim_types = @import("sim_types.zig");
 
 pub const SimStatus = sim_types.SimStatus;
-pub const SimType = sim_types.SimType;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
 pub const SimCanFrame = sim_types.SimCanFrame;
@@ -48,8 +47,9 @@ pub const shared_channels = [_]SimSharedDesc{
     },
 };
 
-pub fn init(ctx: *Ctx) void {
+pub fn init(ctx: *Ctx) SimStatus {
     ctx.* = .{};
+    return .OK;
 }
 
 pub fn reset(ctx: *Ctx) void {
