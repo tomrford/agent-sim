@@ -7,9 +7,10 @@ use crate::cli::args::{CliArgs, Command, RunArgs, WatchArgs};
 use crate::cli::commands::to_request;
 use crate::cli::error::CliError;
 use crate::config::load_config;
-use crate::config::recipe::{ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
+use crate::config::recipe::{AssertSpec, ForSpec, PrintSpec, RecipeStep, toml_value_to_cli_string};
 use crate::connection::send_request;
 use crate::protocol::{Action, Request, Response, ResponseData, SignalValueData, WatchSampleData};
+use crate::sim::types::SignalValue;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
@@ -56,6 +57,7 @@ enum RecipeOp {
     Speed(f64),
     Reset,
     SleepMs(u64),
+    Assert(AssertSpec),
 }
 
 async fn run_watch_command(args: &CliArgs, watch: &WatchArgs) -> Result<ExitCode, CliError> {
@@ -153,6 +155,10 @@ fn compile_recipe_steps(
                 ops.push(RecipeOp::SleepMs(*ms));
             }
             RecipeStep::For { r#for } => compile_for_step(r#for, ops, events)?,
+            RecipeStep::Assert { assert } => {
+                events.push(format!("assert {}", assert.signal));
+                ops.push(RecipeOp::Assert(assert.clone()));
+            }
         }
     }
     Ok(())
@@ -230,6 +236,15 @@ async fn execute_recipe_ops(session: &str, ops: &[RecipeOp]) -> Result<(), CliEr
             RecipeOp::SleepMs(ms) => {
                 sleep(Duration::from_millis(*ms)).await;
             }
+            RecipeOp::Assert(assert) => {
+                let value = fetch_first_signal_value(session, &assert.signal).await?;
+                let context = format_tick_context(session)
+                    .await
+                    .unwrap_or_else(|| "time=unknown".to_string());
+                evaluate_assertion(&assert.signal, &value.value, assert).map_err(|message| {
+                    CliError::AssertionFailed(format!("{message}; {context}"))
+                })?;
+            }
         }
     }
     Ok(())
@@ -280,6 +295,127 @@ async fn fetch_time_snapshot(session: &str) -> Result<(u64, u64), CliError> {
         None => Err(CliError::CommandFailed(
             "missing time status response payload".to_string(),
         )),
+    }
+}
+
+async fn format_tick_context(session: &str) -> Option<String> {
+    fetch_time_snapshot(session)
+        .await
+        .ok()
+        .map(|(ticks, time_us)| format!("tick={ticks} time_us={time_us}"))
+}
+
+fn evaluate_assertion(
+    signal: &str,
+    actual: &SignalValue,
+    assert: &AssertSpec,
+) -> Result<(), String> {
+    let comparator_count = [
+        assert.eq.is_some(),
+        assert.gt.is_some(),
+        assert.lt.is_some(),
+        assert.gte.is_some(),
+        assert.lte.is_some(),
+        assert.approx.is_some(),
+    ]
+    .into_iter()
+    .filter(|v| *v)
+    .count();
+    if comparator_count == 0 {
+        return Err(format!(
+            "assert step for '{signal}' must define one comparator (eq/gt/lt/gte/lte/approx)"
+        ));
+    }
+    if comparator_count > 1 {
+        return Err(format!(
+            "assert step for '{signal}' defines multiple comparators; use exactly one"
+        ));
+    }
+
+    if let Some(expected) = &assert.eq {
+        let ok = compare_eq(actual, expected)?;
+        if !ok {
+            return Err(format!(
+                "assert eq failed for '{signal}': expected {expected:?}, got {actual:?}"
+            ));
+        }
+        return Ok(());
+    }
+
+    let actual_num = signal_value_as_f64(actual)
+        .ok_or_else(|| format!("assertion for '{signal}' expects numeric value, got {actual:?}"))?;
+
+    if let Some(expected) = assert.gt {
+        if actual_num > expected {
+            return Ok(());
+        }
+        return Err(format!(
+            "assert gt failed for '{signal}': expected > {expected}, got {actual_num}"
+        ));
+    }
+    if let Some(expected) = assert.lt {
+        if actual_num < expected {
+            return Ok(());
+        }
+        return Err(format!(
+            "assert lt failed for '{signal}': expected < {expected}, got {actual_num}"
+        ));
+    }
+    if let Some(expected) = assert.gte {
+        if actual_num >= expected {
+            return Ok(());
+        }
+        return Err(format!(
+            "assert gte failed for '{signal}': expected >= {expected}, got {actual_num}"
+        ));
+    }
+    if let Some(expected) = assert.lte {
+        if actual_num <= expected {
+            return Ok(());
+        }
+        return Err(format!(
+            "assert lte failed for '{signal}': expected <= {expected}, got {actual_num}"
+        ));
+    }
+    if let Some(expected) = assert.approx {
+        let tolerance = assert.tolerance.unwrap_or(0.0).abs();
+        if (actual_num - expected).abs() <= tolerance {
+            return Ok(());
+        }
+        return Err(format!(
+            "assert approx failed for '{signal}': expected {expected} ± {tolerance}, got {actual_num}"
+        ));
+    }
+
+    Err(format!("assertion for '{signal}' is invalid"))
+}
+
+fn compare_eq(actual: &SignalValue, expected: &toml::Value) -> Result<bool, String> {
+    match (actual, expected) {
+        (SignalValue::Bool(a), toml::Value::Boolean(b)) => Ok(*a == *b),
+        (SignalValue::U32(a), toml::Value::Integer(b)) => Ok((*a as i64) == *b),
+        (SignalValue::I32(a), toml::Value::Integer(b)) => Ok((*a as i64) == *b),
+        (SignalValue::F32(a), toml::Value::Float(b)) => Ok((*a as f64) == *b),
+        (SignalValue::F64(a), toml::Value::Float(b)) => Ok(*a == *b),
+        (_, toml::Value::Float(b)) => signal_value_as_f64(actual)
+            .map(|a| a == *b)
+            .ok_or_else(|| format!("cannot compare non-numeric value {actual:?} to float {b}")),
+        (_, toml::Value::Integer(b)) => signal_value_as_f64(actual)
+            .map(|a| (a - (*b as f64)).abs() < f64::EPSILON)
+            .ok_or_else(|| format!("cannot compare non-numeric value {actual:?} to integer {b}")),
+        _ => Err(format!(
+            "unsupported eq comparator type for value {actual:?}: expected {expected:?}"
+        )),
+    }
+}
+
+fn signal_value_as_f64(value: &SignalValue) -> Option<f64> {
+    match value {
+        SignalValue::Bool(v) => Some(if *v { 1.0 } else { 0.0 }),
+        SignalValue::U32(v) => Some(*v as f64),
+        SignalValue::I32(v) => Some(*v as f64),
+        SignalValue::F32(v) => Some(*v as f64),
+        SignalValue::F64(v) => Some(*v),
     }
 }
 

@@ -24,6 +24,10 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecipeDef {
     pub description: Option<String>,
+    pub env: Option<String>,
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    pub session: Option<String>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -44,15 +48,28 @@ pub struct ForSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AssertSpec {
+    pub signal: String,
+    pub eq: Option<toml::Value>,
+    pub gt: Option<f64>,
+    pub lt: Option<f64>,
+    pub gte: Option<f64>,
+    pub lte: Option<f64>,
+    pub approx: Option<f64>,
+    pub tolerance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum RecipeStep {
     Set { set: BTreeMap<String, toml::Value> },
     Step { step: String },
     Print { print: PrintSpec },
     Speed { speed: f64 },
-    Reset { reset: Option<bool> },
+    Reset { reset: bool },
     Sleep { sleep: u64 },
     For { r#for: ForSpec },
+    Assert { assert: AssertSpec },
 }
 
 pub fn parse_config(content: &str) -> Result<FileConfig, ConfigError> {
