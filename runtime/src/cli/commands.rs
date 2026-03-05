@@ -219,8 +219,20 @@ mod tests {
 
     #[test]
     fn can_load_dbc_request_resolves_relative_path_to_absolute() {
-        let expected =
-            std::fs::canonicalize("Cargo.toml").expect("Cargo.toml should exist in crate root");
+        let cwd = std::env::current_dir().expect("current directory should be readable");
+        let dbc = tempfile::Builder::new()
+            .prefix("can-load-dbc-")
+            .suffix(".dbc")
+            .tempfile_in(&cwd)
+            .expect("temp dbc should be creatable");
+        std::fs::write(dbc.path(), "VERSION \"\"").expect("temp dbc should be writable");
+        let relative = dbc
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("temp dbc filename should be utf8")
+            .to_string();
+        let expected = std::fs::canonicalize(dbc.path()).expect("temp dbc should canonicalize");
         let args = CliArgs {
             daemon: false,
             json: false,
@@ -231,7 +243,7 @@ mod tests {
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
                     bus: "internal".to_string(),
-                    path: "Cargo.toml".to_string(),
+                    path: relative,
                 },
             })),
         };
