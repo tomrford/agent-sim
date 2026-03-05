@@ -83,6 +83,28 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
+        Some(ResponseData::SignalSample {
+            tick,
+            time_us,
+            values,
+        }) => {
+            println!("Tick: {tick}");
+            println!("Time(us): {time_us}");
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["ID", "Name", "Type", "Value", "Units"]);
+            for signal in values {
+                table.add_row(vec![
+                    signal.id.to_string(),
+                    signal.name.clone(),
+                    signal.signal_type.to_string(),
+                    format!("{:?}", signal.value),
+                    signal.units.clone().unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::SetResult { writes_applied }) => {
             println!("Writes applied: {writes_applied}");
         }
@@ -186,13 +208,14 @@ pub fn print_response(response: &Response, json_mode: bool) {
             recipe,
             dry_run,
             steps_executed,
-            events,
+            steps,
         }) => {
             println!("Recipe: {recipe}");
             println!("Dry run: {dry_run}");
             println!("Steps: {steps_executed}");
-            for event in events {
-                println!("- {event}");
+            for step in steps {
+                let session = step.session.as_deref().unwrap_or("-");
+                println!("- [{:?}] {} {}", step.kind, session, step.detail);
             }
         }
         Some(ResponseData::SessionStatus {

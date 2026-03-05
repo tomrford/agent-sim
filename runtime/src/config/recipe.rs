@@ -26,7 +26,8 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecipeDef {
     pub description: Option<String>,
-    pub env: Option<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
     #[serde(default)]
     pub sessions: Vec<String>,
     pub session: Option<String>,
@@ -83,6 +84,7 @@ pub struct EnvDef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvSession {
     pub name: String,
     pub lib: String,
@@ -104,6 +106,10 @@ pub struct EnvSharedChannel {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetSpec {}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum RecipeStep {
     Set {
@@ -123,7 +129,7 @@ pub enum RecipeStep {
         session: Option<String>,
     },
     Reset {
-        reset: bool,
+        reset: ResetSpec,
         session: Option<String>,
     },
     Sleep {

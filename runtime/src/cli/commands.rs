@@ -4,13 +4,14 @@ use crate::cli::args::{
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
     let action = match command {
-        Command::Load { libpath } => Action::Load {
-            libpath: libpath.clone(),
+        Command::Load(load) => Action::Load {
+            libpath: load.libpath.clone(),
             env_tag: args.env_tag.clone(),
         },
         Command::Info => Action::Info,
@@ -32,7 +33,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             },
             CanCommand::LoadDbc { bus, path } => Action::CanLoadDbc {
                 bus_name: bus.clone(),
-                path: path.clone(),
+                path: canonicalize_cli_path(path)?,
             },
             CanCommand::Send {
                 bus,
@@ -79,6 +80,28 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         id: Uuid::new_v4(),
         action,
     })
+}
+
+fn canonicalize_cli_path(raw_path: &str) -> Result<String, CliError> {
+    let path = Path::new(raw_path);
+    let candidate: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| {
+                CliError::CommandFailed(format!(
+                    "failed to determine current working directory while resolving DBC path '{raw_path}': {e}"
+                ))
+            })?
+            .join(path)
+    };
+    let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+        CliError::CommandFailed(format!(
+            "failed to resolve DBC path '{raw_path}' to an absolute path (candidate '{}'): {e}",
+            candidate.display()
+        ))
+    })?;
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 fn parse_arb_id(value: &str) -> Result<u32, CliError> {
@@ -140,6 +163,7 @@ fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::args::{CanArgs, CliArgs, Command, LoadArgs};
 
     #[test]
     fn set_parser_accepts_single_pair() {
@@ -191,5 +215,88 @@ mod tests {
             "sensor_feed"
         );
         assert!(parse_shared_channel_selector(".*").is_err());
+    }
+
+    #[test]
+    fn can_load_dbc_request_resolves_relative_path_to_absolute() {
+        let cwd = std::env::current_dir().expect("current directory should be readable");
+        let dbc = tempfile::Builder::new()
+            .prefix("can-load-dbc-")
+            .suffix(".dbc")
+            .tempfile_in(&cwd)
+            .expect("temp dbc should be creatable");
+        std::fs::write(dbc.path(), "VERSION \"\"").expect("temp dbc should be writable");
+        let relative = dbc
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("temp dbc filename should be utf8")
+            .to_string();
+        let expected = std::fs::canonicalize(dbc.path()).expect("temp dbc should canonicalize");
+        let args = CliArgs {
+            daemon: false,
+            json: false,
+            session: "default".to_string(),
+            libpath: None,
+            env_tag: None,
+            config: None,
+            command: Some(Command::Can(CanArgs {
+                command: CanCommand::LoadDbc {
+                    bus: "internal".to_string(),
+                    path: relative,
+                },
+            })),
+        };
+        let request = to_request(&args).expect("can load-dbc request should build");
+        let Action::CanLoadDbc { path, .. } = request.action else {
+            panic!("expected can load-dbc action");
+        };
+        assert_eq!(Path::new(&path), expected.as_path());
+    }
+
+    #[test]
+    fn can_load_dbc_request_rejects_missing_path() {
+        let args = CliArgs {
+            daemon: false,
+            json: false,
+            session: "default".to_string(),
+            libpath: None,
+            env_tag: None,
+            config: None,
+            command: Some(Command::Can(CanArgs {
+                command: CanCommand::LoadDbc {
+                    bus: "internal".to_string(),
+                    path: "__missing_dbc_for_test__.dbc".to_string(),
+                },
+            })),
+        };
+        let err = to_request(&args).expect_err("missing DBC should fail early");
+        let CliError::CommandFailed(message) = err else {
+            panic!("expected command failure");
+        };
+        assert!(
+            message.contains("failed to resolve DBC path"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn load_request_preserves_env_tag() {
+        let args = CliArgs {
+            daemon: false,
+            json: false,
+            session: "default".to_string(),
+            libpath: None,
+            env_tag: Some("bench".to_string()),
+            config: None,
+            command: Some(Command::Load(LoadArgs {
+                libpath: "/tmp/libsim.dylib".to_string(),
+            })),
+        };
+        let request = to_request(&args).expect("load request should build");
+        let Action::Load { env_tag, .. } = request.action else {
+            panic!("expected load action");
+        };
+        assert_eq!(env_tag.as_deref(), Some("bench"));
     }
 }

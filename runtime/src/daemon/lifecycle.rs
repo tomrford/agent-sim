@@ -6,6 +6,15 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
 
+#[derive(Debug, Clone, Default)]
+pub struct DaemonBootstrap {
+    pub libpath: String,
+    pub env_tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionRegistry;
+
 pub fn session_root() -> PathBuf {
     if let Some(path) = std::env::var_os("AGENT_SIM_HOME") {
         return PathBuf::from(path);
@@ -29,12 +38,7 @@ pub fn meta_path(session: &str) -> PathBuf {
 }
 
 pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
-    std::fs::create_dir_all(session_root())?;
-    let socket = socket_path(session);
-    if can_connect(&socket).await {
-        return Ok(());
-    }
-    Err(DaemonError::NotRunning(session.to_string()))
+    SessionRegistry.ensure_running(session).await
 }
 
 pub async fn bootstrap_daemon(
@@ -42,83 +46,116 @@ pub async fn bootstrap_daemon(
     libpath: &str,
     env_tag: Option<&str>,
 ) -> Result<(), DaemonError> {
-    std::fs::create_dir_all(session_root())?;
-    let socket = socket_path(session);
-    if can_connect(&socket).await {
-        return Err(DaemonError::AlreadyRunning(session.to_string()));
-    }
-    let mut child = spawn_daemon(session, libpath, env_tag)?;
+    SessionRegistry
+        .bootstrap(
+            session,
+            &DaemonBootstrap {
+                libpath: libpath.to_string(),
+                env_tag: env_tag.map(ToString::to_string),
+            },
+        )
+        .await
+}
 
-    let timeout = Duration::from_secs(5);
-    let mut waited = Duration::from_millis(0);
-    while waited < timeout {
+impl SessionRegistry {
+    pub async fn ensure_running(self, session: &str) -> Result<(), DaemonError> {
+        std::fs::create_dir_all(session_root())?;
+        let socket = socket_path(session);
         if can_connect(&socket).await {
             return Ok(());
         }
-        if let Some(status) = child.try_wait()? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            let details = stderr.trim();
-            let message = if details.is_empty() {
-                format!("daemon exited with status {status}")
-            } else {
-                details.to_string()
-            };
-            return Err(DaemonError::StartupFailed(message));
-        }
-        sleep(Duration::from_millis(100)).await;
-        waited += Duration::from_millis(100);
+        Err(DaemonError::NotRunning(session.to_string()))
     }
-    Err(DaemonError::StartupTimeout)
+
+    pub async fn bootstrap(
+        self,
+        session: &str,
+        bootstrap: &DaemonBootstrap,
+    ) -> Result<(), DaemonError> {
+        std::fs::create_dir_all(session_root())?;
+        let socket = socket_path(session);
+        if can_connect(&socket).await {
+            return Err(DaemonError::AlreadyRunning(session.to_string()));
+        }
+        let mut child = self.spawn_daemon(session, bootstrap)?;
+
+        let timeout = Duration::from_secs(5);
+        let mut waited = Duration::from_millis(0);
+        while waited < timeout {
+            if can_connect(&socket).await {
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                let details = stderr.trim();
+                let message = if details.is_empty() {
+                    format!("daemon exited with status {status}")
+                } else {
+                    details.to_string()
+                };
+                return Err(DaemonError::StartupFailed(message));
+            }
+            sleep(Duration::from_millis(100)).await;
+            waited += Duration::from_millis(100);
+        }
+        Err(DaemonError::StartupTimeout)
+    }
+
+    fn spawn_daemon(
+        self,
+        session: &str,
+        bootstrap: &DaemonBootstrap,
+    ) -> Result<std::process::Child, DaemonError> {
+        let exe = std::env::current_exe()?;
+        let mut command = std::process::Command::new(exe);
+        command
+            .arg("--daemon")
+            .arg("--session")
+            .arg(session)
+            .arg("--libpath")
+            .arg(&bootstrap.libpath)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(env_tag) = &bootstrap.env_tag {
+            command.arg("--env-tag").arg(env_tag);
+        }
+        let child = command.spawn()?;
+        Ok(child)
+    }
+
+    pub async fn list_sessions(
+        self,
+    ) -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
+        let root = session_root();
+        std::fs::create_dir_all(&root)?;
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("sock") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let running = can_connect(&path).await;
+            let env = read_env_tag(stem);
+            out.push((stem.to_string(), path, running, env));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
 }
 
-fn spawn_daemon(
-    session: &str,
-    libpath: &str,
-    env_tag: Option<&str>,
-) -> Result<std::process::Child, DaemonError> {
-    let exe = std::env::current_exe()?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("--daemon")
-        .arg("--session")
-        .arg(session)
-        .arg("--libpath")
-        .arg(libpath)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if let Some(env_tag) = env_tag {
-        command.arg("--env-tag").arg(env_tag);
-    }
-    let child = command.spawn()?;
-    Ok(child)
+pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
+    SessionRegistry.list_sessions().await
 }
 
 async fn can_connect(socket: &Path) -> bool {
     UnixStream::connect(socket).await.is_ok()
-}
-
-pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
-    let root = session_root();
-    std::fs::create_dir_all(&root)?;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|v| v.to_str()) != Some("sock") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let running = can_connect(&path).await;
-        let env = read_env_tag(stem);
-        out.push((stem.to_string(), path, running, env));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
 }
 
 pub fn write_env_tag(session: &str, env: Option<&str>) -> Result<(), DaemonError> {

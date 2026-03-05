@@ -215,7 +215,8 @@ SimStatus sim_can_get_buses(SimCanBusDesc *out, uint32_t capacity,
 /**
  * @brief Deliver received CAN frames to the DLL before sim_tick().
  */
-SimStatus sim_can_rx(uint32_t bus_id, const SimCanFrame *frames, uint32_t count);
+SimStatus sim_can_rx(uint32_t bus_id, const SimCanFrame *frames,
+                     uint32_t count);
 
 /**
  * @brief Collect CAN frames queued for TX by the DLL after sim_tick().
@@ -246,7 +247,8 @@ typedef struct {
 /**
  * @brief Enumerate shared-state channels exposed by the DLL.
  *
- * Optional export: if any sim_shared_* symbol is exported, all must be exported.
+ * Optional export: if any sim_shared_* symbol is exported, all must be
+ * exported.
  */
 SimStatus sim_shared_get_channels(SimSharedDesc *out, uint32_t capacity,
                                   uint32_t *out_written);

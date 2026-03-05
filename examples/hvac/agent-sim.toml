@@ -5,11 +5,20 @@ speed = 1.0
 [defaults.load]
 lib = "./zig-out/lib/libsim_hvac_example.dylib"
 
+# -- Envs ---------------------------------------------------------------------
+
+[env.single-node]
+sessions = [
+  { name = "hvac-single", lib = "./zig-out/lib/libsim_hvac_example.dylib" },
+]
+
 # -- Recipes ------------------------------------------------------------------
 
 [recipe.init]
 description = "Power on with sane defaults (22 °C target, auto mode, 20 °C ambient)"
+env = ["single-node"]
 steps = [
+  { reset = {} },
   { set = { "hvac.power" = true, "hvac.target_temp" = 22.0, "hvac.mode" = 0, "hvac.ambient_temp" = 20.0, "hvac.current_temp" = 20.0 } },
   { step = "100ms" },
   { print = "*" },
@@ -17,7 +26,9 @@ steps = [
 
 [recipe.heat-test]
 description = "Cold ambient → verify heating cycle engages"
+env = ["single-node"]
 steps = [
+  { reset = {} },
   { set = { "hvac.power" = true, "hvac.target_temp" = 22.0, "hvac.mode" = 0, "hvac.ambient_temp" = 5.0, "hvac.current_temp" = 10.0 } },
   { step = "5s" },
   { print = [
@@ -30,7 +41,9 @@ steps = [
 
 [recipe.cool-test]
 description = "Hot ambient → verify cooling cycle engages"
+env = ["single-node"]
 steps = [
+  { reset = {} },
   { set = { "hvac.power" = true, "hvac.target_temp" = 22.0, "hvac.mode" = 0, "hvac.ambient_temp" = 35.0, "hvac.current_temp" = 30.0 } },
   { step = "5s" },
   { print = [
@@ -43,9 +56,13 @@ steps = [
 
 [recipe.fault-over-temp]
 description = "Push current_temp above hi-limit (60 °C) → verify fault latch"
+env = ["single-node"]
 steps = [
-  { set = { "hvac.power" = true, "hvac.current_temp" = 59.5, "hvac.ambient_temp" = 55.0, "hvac.target_temp" = 22.0 } },
-  { step = "2s" },
+  { reset = {} },
+  { set = { "hvac.power" = true, "hvac.current_temp" = 65.0, "hvac.ambient_temp" = 65.0, "hvac.target_temp" = 22.0 } },
+  { step = "100ms" },
+  { assert = { signal = "hvac.state", eq = 5 } },
+  { assert = { signal = "hvac.error_code", eq = 1 } },
   { print = [
     "hvac.state",
     "hvac.error_code",
@@ -56,7 +73,9 @@ steps = [
 
 [recipe.mode-sweep]
 description = "Cycle through auto / heat-only / cool-only and print state at each"
+env = ["single-node"]
 steps = [
+  { reset = {} },
   { set = { "hvac.power" = true, "hvac.ambient_temp" = 15.0, "hvac.current_temp" = 18.0, "hvac.target_temp" = 22.0 } },
   { for = { signal = "hvac.mode", from = 0.0, to = 2.0, by = 1.0, each = [
     { step = "2s" },
@@ -67,14 +86,16 @@ steps = [
       "hvac.compressor",
       "hvac.fan",
     ] },
-    { reset = true },
+    { reset = {} },
     { set = { "hvac.power" = true, "hvac.ambient_temp" = 15.0, "hvac.current_temp" = 18.0, "hvac.target_temp" = 22.0 } },
   ] } },
 ]
 
 [recipe.temp-sweep]
 description = "Sweep target temp from 18 → 28 °C, print state each step"
+env = ["single-node"]
 steps = [
+  { reset = {} },
   { set = { "hvac.power" = true, "hvac.mode" = 0, "hvac.ambient_temp" = 20.0, "hvac.current_temp" = 20.0 } },
   { for = { signal = "hvac.target_temp", from = 18.0, to = 28.0, by = 2.0, each = [
     { step = "3s" },

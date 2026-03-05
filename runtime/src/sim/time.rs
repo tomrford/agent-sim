@@ -1,6 +1,10 @@
 use crate::protocol::TimeStateData;
 use crate::sim::error::TimeError;
 use std::time::Instant;
+use tokio::time::Duration;
+
+const MIN_POLL_DELAY_US: f64 = 100.0;
+const MAX_POLL_DELAY_US: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone)]
 pub struct TimeStatus {
@@ -135,7 +139,63 @@ impl TimeEngine {
         ticks
     }
 
+    pub fn realtime_poll_delay(&self, tick_duration_us: u32) -> Duration {
+        if self.state != TimeStateData::Running {
+            return Duration::from_millis(5);
+        }
+        if tick_duration_us == 0 {
+            return Duration::from_millis(1);
+        }
+        let tick_us = tick_duration_us as f64;
+        let remaining_sim_us = (tick_us - self.remainder_us).max(0.0);
+        let wall_us = if self.speed > 0.0 {
+            (remaining_sim_us / self.speed).ceil()
+        } else {
+            tick_us.ceil()
+        };
+        let clamped_wall_us = wall_us.clamp(MIN_POLL_DELAY_US, MAX_POLL_DELAY_US);
+        Duration::from_micros(clamped_wall_us as u64)
+    }
+
     pub fn advance_ticks(&mut self, ticks: u64) {
         self.elapsed_ticks = self.elapsed_ticks.saturating_add(ticks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimeEngine;
+    use crate::protocol::TimeStateData;
+    use tokio::time::Duration;
+
+    #[test]
+    fn realtime_poll_delay_scales_with_tick_duration() {
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 1.0,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
+        let delay = engine.realtime_poll_delay(20_000);
+        assert!(
+            delay >= Duration::from_millis(20),
+            "expected >=20ms delay, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn realtime_poll_delay_is_capped_to_one_second() {
+        let engine = TimeEngine {
+            state: TimeStateData::Running,
+            speed: 0.001,
+            remainder_us: 0.0,
+            ..TimeEngine::default()
+        };
+        let delay = engine.realtime_poll_delay(1_000_000);
+        assert_eq!(
+            delay,
+            Duration::from_secs(1),
+            "poll delay should be capped for extreme slow speeds"
+        );
     }
 }
