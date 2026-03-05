@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Duration, timeout};
+use tokio::time::timeout;
 
 pub struct DaemonState {
     session: String,
@@ -283,11 +283,9 @@ async fn run_tick_task(
             break;
         }
 
-        let sleep_duration = if state.time.is_running() {
-            Duration::from_millis(1)
-        } else {
-            Duration::from_millis(5)
-        };
+        let sleep_duration = state
+            .time
+            .realtime_poll_delay(state.project.tick_duration_us());
         match timeout(sleep_duration, action_rx.recv()).await {
             Ok(Some(message)) => process_action_message(message, &mut state).await,
             Ok(None) => break,

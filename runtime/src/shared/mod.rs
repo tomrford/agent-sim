@@ -38,6 +38,7 @@ impl SharedRegion {
         let expected_len = Self::byte_len(slot_count);
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)
@@ -99,6 +100,14 @@ impl SharedRegion {
             ));
         }
         let slot_capacity = self.slot_count;
+        for slot in slots {
+            if slot.slot_id as usize >= slot_capacity {
+                return Err(format!(
+                    "shared slot id {} exceeds channel capacity {}",
+                    slot.slot_id, slot_capacity
+                ));
+            }
+        }
         let generation = self.generation();
         self.set_generation(generation.saturating_add(1)); // odd = write in progress
         {
@@ -107,12 +116,6 @@ impl SharedRegion {
                 *slot = SimSharedSlotRaw::default();
             }
             for slot in slots {
-                if slot.slot_id as usize >= slot_capacity {
-                    return Err(format!(
-                        "shared slot id {} exceeds channel capacity {}",
-                        slot.slot_id, slot_capacity
-                    ));
-                }
                 slot_storage[slot.slot_id as usize] = slot.to_raw();
             }
         }
@@ -126,7 +129,7 @@ impl SharedRegion {
     pub fn read_snapshot(&self) -> Vec<SimSharedSlot> {
         for _ in 0..10 {
             let before = self.generation();
-            if before % 2 == 1 {
+            if !before.is_multiple_of(2) {
                 continue;
             }
             let snapshot = self
@@ -135,7 +138,7 @@ impl SharedRegion {
                 .filter_map(|slot| SimSharedSlot::from_raw(*slot))
                 .collect::<Vec<_>>();
             let after = self.generation();
-            if before == after && after % 2 == 0 {
+            if before == after && after.is_multiple_of(2) {
                 return snapshot;
             }
         }
@@ -163,16 +166,22 @@ impl SharedRegion {
 
     fn generation(&self) -> u64 {
         let header = self.mmap.as_ptr().cast::<SharedHeader>();
-        let generation_ptr = unsafe { &(*header).generation as *const u64 as *const AtomicU64 };
-        unsafe { (*generation_ptr).load(Ordering::Acquire) }
+        let generation_ptr = unsafe { std::ptr::addr_of!((*header).generation) as *mut u64 };
+        // SAFETY:
+        // - `generation_ptr` points to the `generation` field inside the mmap-backed
+        //   `SharedHeader`, which is a valid, initialized `u64` for the lifetime of `self`.
+        // - `SharedHeader` is `#[repr(C)]`, so the field address is stable.
+        // - access to this field is performed atomically via `generation()`/`set_generation()`
+        //   once the region is initialized, satisfying `AtomicU64::from_ptr` requirements.
+        let generation = unsafe { AtomicU64::from_ptr(generation_ptr) };
+        generation.load(Ordering::Acquire)
     }
 
     fn set_generation(&mut self, value: u64) {
         let header = self.mmap.as_mut_ptr().cast::<SharedHeader>();
-        let generation_ptr = unsafe { &mut (*header).generation as *mut u64 as *mut AtomicU64 };
-        unsafe {
-            (*generation_ptr).store(value, Ordering::Release);
-        }
+        let generation_ptr = unsafe { std::ptr::addr_of_mut!((*header).generation) };
+        let generation = unsafe { AtomicU64::from_ptr(generation_ptr) };
+        generation.store(value, Ordering::Release);
     }
 
     fn slot_storage(&self) -> &[SimSharedSlotRaw] {
@@ -231,5 +240,42 @@ mod tests {
         assert_eq!(snapshot.len(), 2);
         assert!(snapshot.iter().any(|slot| slot.slot_id == 0));
         assert!(snapshot.iter().any(|slot| slot.slot_id == 1));
+    }
+
+    #[test]
+    fn publish_invalid_slot_id_does_not_poison_generation() {
+        let dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let path = dir.path().join("region.bin");
+        let mut region = SharedRegion::open(&path, 2, "writer", true)
+            .expect("shared region should open for writer");
+        region
+            .publish(&[SimSharedSlot {
+                slot_id: 0,
+                value: SignalValue::F32(7.0),
+            }])
+            .expect("initial publish should succeed");
+        let before = region.generation();
+
+        let err = region.publish(&[SimSharedSlot {
+            slot_id: 9,
+            value: SignalValue::Bool(true),
+        }]);
+        assert!(err.is_err(), "publish should fail for invalid slot id");
+        assert_eq!(
+            region.generation(),
+            before,
+            "failed publish must not leave generation in a poisoned state"
+        );
+        assert!(
+            region.generation().is_multiple_of(2),
+            "generation must remain even after failed publish"
+        );
+        let snapshot = region.read_snapshot();
+        assert!(
+            snapshot
+                .iter()
+                .any(|slot| slot.slot_id == 0 && slot.value == SignalValue::F32(7.0)),
+            "previous snapshot payload should remain readable after failed publish"
+        );
     }
 }

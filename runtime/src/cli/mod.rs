@@ -135,7 +135,7 @@ async fn run_recipe_command(args: &CliArgs, run: &RunArgs) -> Result<ExitCode, C
         ResponseData::RecipeResult {
             recipe: run.recipe_name.clone(),
             dry_run: run.dry_run,
-            steps_executed: recipe_def.steps.len(),
+            steps_executed: ops.len(),
             events,
         },
     );
@@ -179,6 +179,11 @@ async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<ExitCode, CliE
 async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliError> {
     let config = load_config(args.config.as_deref().map(Path::new))
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
+    let config_base_dir = config
+        .source_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
     let env_def = config
         .env(env_name)
         .map_err(|e| CliError::CommandFailed(e.to_string()))?
@@ -187,7 +192,13 @@ async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliEr
     ensure_sessions_available(&env_def).await?;
 
     let mut started_sessions = Vec::new();
-    let result = start_env_internal(env_name, &env_def, &mut started_sessions).await;
+    let result = start_env_internal(
+        env_name,
+        &env_def,
+        config_base_dir.as_deref(),
+        &mut started_sessions,
+    )
+    .await;
     if let Err(err) = result {
         rollback_started_sessions(&started_sessions).await;
         return Err(err);
@@ -283,6 +294,7 @@ async fn ensure_sessions_available(env_def: &EnvDef) -> Result<(), CliError> {
 async fn start_env_internal(
     env_name: &str,
     env_def: &EnvDef,
+    config_base_dir: Option<&Path>,
     started_sessions: &mut Vec<String>,
 ) -> Result<(), CliError> {
     for session in &env_def.sessions {
@@ -301,7 +313,7 @@ async fn start_env_internal(
     }
 
     for (bus_name, bus) in &env_def.can {
-        apply_env_bus_wiring(bus_name, bus).await?;
+        apply_env_bus_wiring(bus_name, bus, config_base_dir).await?;
     }
     for (channel_name, channel) in &env_def.shared {
         apply_env_shared_wiring(env_name, channel_name, channel).await?;
@@ -309,7 +321,11 @@ async fn start_env_internal(
     Ok(())
 }
 
-async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), CliError> {
+async fn apply_env_bus_wiring(
+    bus_name: &str,
+    bus: &EnvCanBus,
+    config_base_dir: Option<&Path>,
+) -> Result<(), CliError> {
     for member in &bus.members {
         let (session_name, member_bus_name) = parse_env_member(member, bus_name)?;
         send_action_success(
@@ -321,17 +337,29 @@ async fn apply_env_bus_wiring(bus_name: &str, bus: &EnvCanBus) -> Result<(), Cli
         )
         .await?;
         if let Some(dbc_path) = &bus.dbc {
+            let resolved_path = resolve_config_relative_path(dbc_path, config_base_dir);
             send_action_success(
                 &session_name,
                 Action::CanLoadDbc {
                     bus_name: member_bus_name,
-                    path: dbc_path.clone(),
+                    path: resolved_path,
                 },
             )
             .await?;
         }
     }
     Ok(())
+}
+
+fn resolve_config_relative_path(raw_path: &str, config_base_dir: Option<&Path>) -> String {
+    let path = Path::new(raw_path);
+    if path.is_absolute() {
+        return raw_path.to_string();
+    }
+    if let Some(base_dir) = config_base_dir {
+        return base_dir.join(path).to_string_lossy().into_owned();
+    }
+    raw_path.to_string()
 }
 
 async fn apply_env_shared_wiring(
@@ -500,15 +528,24 @@ fn compile_for_step(
     if spec.by == 0.0 {
         return Err("for.by cannot be zero".to_string());
     }
-    let mut current = spec.from;
-    let within_bounds = |v: f64| {
-        if spec.by > 0.0 {
-            v <= spec.to
-        } else {
-            v >= spec.to
-        }
-    };
-    while within_bounds(current) {
+    let delta = spec.to - spec.from;
+    if (spec.by > 0.0 && delta < 0.0) || (spec.by < 0.0 && delta > 0.0) {
+        return Ok(());
+    }
+    let raw_steps = delta / spec.by;
+    if !raw_steps.is_finite() {
+        return Err("for range is not finite".to_string());
+    }
+    let epsilon = 1e-9_f64;
+    let max_steps_float = (raw_steps + epsilon).floor();
+    debug_assert!(max_steps_float >= 0.0);
+    if max_steps_float >= u64::MAX as f64 {
+        return Err("for range expands to too many iterations".to_string());
+    }
+    let max_steps = max_steps_float as u64;
+
+    for idx in 0..=max_steps {
+        let current = spec.from + spec.by * idx as f64;
         events.push(format!("for {}={current}", spec.signal));
         let mut writes = BTreeMap::new();
         writes.insert(spec.signal.clone(), current.to_string());
@@ -517,7 +554,6 @@ fn compile_for_step(
             writes,
         });
         compile_recipe_steps(&spec.each, ops, events, inherited_session)?;
-        current += spec.by;
     }
     Ok(())
 }
@@ -780,4 +816,81 @@ fn response_error(response: &Response) -> String {
         .error
         .clone()
         .unwrap_or_else(|| "command failed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecipeOp, compile_for_step, resolve_config_relative_path};
+    use crate::config::recipe::ForSpec;
+    use std::path::Path;
+
+    #[test]
+    fn resolve_config_relative_path_joins_relative_to_config_dir() {
+        let resolved =
+            resolve_config_relative_path("dbc/internal.dbc", Some(Path::new("/tmp/agent-sim")));
+        assert_eq!(resolved, "/tmp/agent-sim/dbc/internal.dbc");
+    }
+
+    #[test]
+    fn resolve_config_relative_path_keeps_absolute_paths() {
+        let absolute = std::env::temp_dir()
+            .join("agent-sim")
+            .join("internal.dbc")
+            .to_string_lossy()
+            .into_owned();
+        let resolved =
+            resolve_config_relative_path(&absolute, Some(Path::new("/tmp/should-not-apply")));
+        assert_eq!(resolved, absolute);
+    }
+
+    #[test]
+    fn compile_for_step_uses_stable_iteration_count_for_fractional_steps() {
+        let spec = ForSpec {
+            signal: "demo.input".to_string(),
+            from: 0.0,
+            to: 1.0,
+            by: 0.1,
+            each: Vec::new(),
+        };
+        let mut ops = Vec::new();
+        let mut events = Vec::new();
+        compile_for_step(&spec, &mut ops, &mut events, None)
+            .expect("for-step compile should succeed");
+        assert_eq!(ops.len(), 11);
+        for (idx, op) in ops.iter().enumerate() {
+            let RecipeOp::Set { writes, .. } = op else {
+                panic!("for-step should compile into set ops only for empty 'each'");
+            };
+            let raw = writes
+                .get("demo.input")
+                .expect("compiled write should include loop signal");
+            let value = raw
+                .parse::<f64>()
+                .expect("compiled write value should parse as f64");
+            let expected = idx as f64 * 0.1;
+            assert!(
+                (value - expected).abs() <= 1e-9,
+                "expected value {expected}, got {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_for_step_rejects_u64_max_edge_case() {
+        let spec = ForSpec {
+            signal: "demo.input".to_string(),
+            from: 0.0,
+            to: u64::MAX as f64,
+            by: 1.0,
+            each: Vec::new(),
+        };
+        let mut ops = Vec::new();
+        let mut events = Vec::new();
+        let err = compile_for_step(&spec, &mut ops, &mut events, None)
+            .expect_err("2^64-sized range must be rejected");
+        assert!(
+            err.contains("too many iterations"),
+            "unexpected error: {err}"
+        );
+    }
 }

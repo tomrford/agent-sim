@@ -483,7 +483,7 @@ impl Project {
                 .into_iter()
                 .map(|entry| {
                     if entry.name.is_null() {
-                        return Err(ProjectError::InvalidSharedMetadata);
+                        return Err(ProjectError::InvalidCanMetadata);
                     }
                     let name = unsafe { CStr::from_ptr(entry.name) }
                         .to_string_lossy()
@@ -531,7 +531,7 @@ impl Project {
                 .into_iter()
                 .map(|entry| {
                     if entry.name.is_null() {
-                        return Err(ProjectError::InvalidCanMetadata);
+                        return Err(ProjectError::InvalidSharedMetadata);
                     }
                     let name = unsafe { CStr::from_ptr(entry.name) }
                         .to_string_lossy()
