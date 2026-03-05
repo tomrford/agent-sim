@@ -109,7 +109,7 @@ impl SharedRegion {
             }
         }
         let generation = self.generation();
-        self.set_generation(generation.saturating_add(1)); // odd = write in progress
+        self.set_generation(generation.wrapping_add(1)); // odd = write in progress
         {
             let slot_storage = self.slot_storage_mut();
             for slot in slot_storage.iter_mut() {
@@ -119,7 +119,7 @@ impl SharedRegion {
                 slot_storage[slot.slot_id as usize] = slot.to_raw();
             }
         }
-        self.set_generation(generation.saturating_add(2)); // even = stable snapshot
+        self.set_generation(generation.wrapping_add(2)); // even = stable snapshot
         self.mmap
             .flush_async()
             .map_err(|e| format!("failed flushing shared snapshot: {e}"))?;
@@ -276,6 +276,36 @@ mod tests {
                 .iter()
                 .any(|slot| slot.slot_id == 0 && slot.value == SignalValue::F32(7.0)),
             "previous snapshot payload should remain readable after failed publish"
+        );
+    }
+
+    #[test]
+    fn publish_wraps_generation_without_leaving_odd_state() {
+        let dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let path = dir.path().join("region.bin");
+        let mut region = SharedRegion::open(&path, 2, "writer", true)
+            .expect("shared region should open for writer");
+        region.set_generation(u64::MAX - 1);
+
+        region
+            .publish(&[SimSharedSlot {
+                slot_id: 1,
+                value: SignalValue::Bool(true),
+            }])
+            .expect("publish should succeed near generation rollover");
+
+        let generation = region.generation();
+        assert_eq!(generation, 0, "generation should wrap to 0 after publish");
+        assert!(
+            generation.is_multiple_of(2),
+            "generation must remain even after wrapped publish"
+        );
+        let snapshot = region.read_snapshot();
+        assert!(
+            snapshot
+                .iter()
+                .any(|slot| slot.slot_id == 1 && slot.value == SignalValue::Bool(true)),
+            "snapshot payload should remain readable after wrapped publish"
         );
     }
 }
