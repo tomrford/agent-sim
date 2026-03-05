@@ -1,4 +1,4 @@
-# PRD: Terminology Refresh and Migration Documentation
+# PRD: Terminology Standardization and Migration Documentation
 
 Status: draft
 
@@ -12,25 +12,16 @@ Related:
 
 This PRD covers two adjacent product concerns:
 
-1. shifting the preferred user-facing term from `session` to `instance`
-2. expanding migration documentation so it stays aligned with the new env daemon and CAN scaffolding direction
+1. standardizing the user-facing term `instance`
+2. expanding migration documentation so it stays aligned with the env daemon and CAN scaffolding direction
 
-The goal is not a risky big-bang rename. The goal is to improve product language, reduce conceptual confusion, and make migration guidance strong enough to support the upcoming architecture work.
+The goal is to improve product language, reduce conceptual confusion, and make migration guidance strong enough to support the current architecture.
 
 ## Problem
 
 ### Terminology
 
-`session` works technically, but it is not the best user-facing term for a running simulated device.
-
-Problems with `session`:
-
-- it sounds transient and CLI-connection-oriented rather than device-oriented
-- it does not read naturally in multi-device envs
-- it competes conceptually with `env`, `device`, and future transport concepts
-- it makes docs more abstract than necessary for users who think in terms of running instances of firmware
-
-`instance` is a better fit for the likely product language:
+`instance` is the right user-facing term for a running simulated device:
 
 - one firmware/device can have multiple instances
 - an env contains multiple instances
@@ -45,17 +36,16 @@ Upcoming changes now touch:
 - env orchestration
 - CAN scaffolding
 - DBC usage expectations
-- potential terminology changes
+- terminology standardization
 - demo and test expectations
 
 If migration guidance lags behind implementation, users and future coding agents will follow stale patterns.
 
 ## Goals
 
-- Prefer `instance` over `session` in user-facing product language
+- Use `instance` consistently in user-facing product language
 - Land a clean, repo-wide cutover to `instance`
-- Preserve compatibility where practical during transition
-- Clearly define which surfaces move first and which stay stable longer
+- Keep migration guidance aligned with the shipped surface
 - Expand migration docs to reflect the env daemon and dedicated CAN scaffolding direction
 - Require demo/doc/test updates to land alongside the feature work they describe
 
@@ -63,7 +53,6 @@ If migration guidance lags behind implementation, users and future coding agents
 
 - Renaming every internal symbol immediately
 - Rewriting history across all existing docs in one pass
-- Breaking existing CLI/scripts without a compatibility window
 - Solving every naming question in one document
 
 ## Terminology Model
@@ -74,11 +63,9 @@ Preferred product vocabulary:
 - `instance`: a running simulated instance of a device
 - `env`: a coordinated collection of instances plus topology/transports
 
-Avoid using `session` in new user-facing docs unless needed for backward compatibility context.
-
 ## Recommendation
 
-Adopt `instance` as the preferred user-facing term, but stage the rollout.
+Adopt `instance` as the single user-facing term.
 
 ### User-facing direction
 
@@ -98,7 +85,7 @@ Land a single preferred surface with no compatibility aliases:
 - `instances = [...]`
 - `instance = "..."` in recipe/default targeting
 
-Old `session` / `sessions` terminology should be removed rather than preserved as an alias.
+Remove older terminology rather than preserving it as an alias.
 
 ### Internal code direction
 
@@ -107,14 +94,14 @@ Internal symbols do not need to be renamed immediately.
 Recommended order:
 
 1. rename docs/help text first
-2. add CLI/config aliases
+2. land the final CLI/config cutover
 3. rename internal code opportunistically when touching relevant areas
 
 This keeps churn controlled.
 
 ## Suggested Surface-by-Surface Plan
 
-### Phase 1: Documentation-first rename
+### Phase 1: Documentation-first standardization
 
 Change new and actively maintained docs to prefer `instance`.
 
@@ -124,10 +111,6 @@ Examples:
 - PRDs
 - README concepts section
 - examples and walkthroughs
-
-When old terminology must be mentioned, use explicit compatibility wording such as:
-
-- "instance (currently called `session` in some CLI surfaces)"
 
 ### Phase 2: CLI/config cutover
 
@@ -157,7 +140,6 @@ The migration guidance needs to evolve from "what symbols exist" to "how to part
 It should cover:
 
 - preferred terminology (`instance`)
-- current compatibility terms (`session`)
 - env daemon model vs old CLI fan-out assumptions
 - dedicated CAN scaffolding instead of CAN-through-signal projection
 - DBC as CAN helper/codec rather than primary signal interface
@@ -191,7 +173,6 @@ This means:
 For users:
 
 - how to think about `instance` vs `device` vs `env`
-- which CLI terms are preferred vs compatibility aliases
 - how env-level control differs from direct instance control
 - how CAN is now modeled
 
@@ -214,14 +195,14 @@ For future coding agents:
 
 ## Mitigations
 
-- make `instance` the preferred wording everywhere new
+- make `instance` the required wording everywhere user-facing
 - finish with one clean terminology pass
 - require doc/demo/test updates in the same workstream as feature delivery
 
 ## Deliverables
 
-- [ ] Preferred terminology documented: `instance` over `session`
-- [ ] Compatibility strategy defined for CLI/config surfaces
+- [ ] Preferred terminology documented: `instance`
+- [ ] Final CLI/config terminology documented
 - [ ] Migration guidance updated to match env daemon and CAN scaffolding direction
 - [ ] Coding-agent migration prompt/spec refreshed
 - [ ] README and active docs updated to use preferred terminology where practical
@@ -229,6 +210,4 @@ For future coding agents:
 
 ## Open Questions
 
-1. Should the CLI eventually make `instance` the canonical command/flag and treat `session` purely as an alias?
-2. Should env config eventually standardize on `instances`, or keep `sessions` for stability?
-3. How much internal renaming is worth doing once user-facing terminology is cleaned up?
+1. How much internal renaming is worth doing once user-facing terminology is cleaned up?
