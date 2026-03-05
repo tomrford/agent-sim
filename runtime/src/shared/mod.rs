@@ -167,6 +167,12 @@ impl SharedRegion {
     fn generation(&self) -> u64 {
         let header = self.mmap.as_ptr().cast::<SharedHeader>();
         let generation_ptr = unsafe { std::ptr::addr_of!((*header).generation) as *mut u64 };
+        // SAFETY:
+        // - `generation_ptr` points to the `generation` field inside the mmap-backed
+        //   `SharedHeader`, which is a valid, initialized `u64` for the lifetime of `self`.
+        // - `SharedHeader` is `#[repr(C)]`, so the field address is stable.
+        // - access to this field is performed atomically via `generation()`/`set_generation()`
+        //   once the region is initialized, satisfying `AtomicU64::from_ptr` requirements.
         let generation = unsafe { AtomicU64::from_ptr(generation_ptr) };
         generation.load(Ordering::Acquire)
     }
