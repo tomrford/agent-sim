@@ -81,6 +81,20 @@ pub struct SimSignalDescRaw {
     pub units: *const c_char,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SimInitEntryRaw {
+    pub key: *const c_char,
+    pub value: SimValueRaw,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SimInitConfigRaw {
+    pub entries: *const SimInitEntryRaw,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalType {

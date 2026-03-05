@@ -67,7 +67,7 @@ steps = [
       "hvac.compressor",
       "hvac.fan",
     ] },
-    { reset = true },
+    { reset = {} },
     { set = { "hvac.power" = true, "hvac.ambient_temp" = 15.0, "hvac.current_temp" = 18.0, "hvac.target_temp" = 22.0 } },
   ] } },
 ]

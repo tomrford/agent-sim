@@ -1,8 +1,10 @@
 use crate::cli::args::{
-    CanCommand, CliArgs, Command, SessionCommand, SetArgs, SharedCommand, TimeCommand,
+    CanCommand, CliArgs, Command, LoadArgs, SessionCommand, SetArgs, SharedCommand, TimeCommand,
 };
 use crate::cli::error::CliError;
 use crate::protocol::{Action, Request};
+use crate::sim::init::InitEntry;
+use crate::sim::types::SignalValue;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -10,9 +12,10 @@ use uuid::Uuid;
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
     let action = match command {
-        Command::Load { libpath } => Action::Load {
-            libpath: libpath.clone(),
+        Command::Load(load) => Action::Load {
+            libpath: load.libpath.clone(),
             env_tag: args.env_tag.clone(),
+            init: parse_init_entries(load)?,
         },
         Command::Info => Action::Info,
         Command::Signals => Action::Signals,
@@ -104,6 +107,54 @@ fn canonicalize_cli_path(raw_path: &str) -> Result<String, CliError> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+fn parse_init_entries(args: &LoadArgs) -> Result<Vec<InitEntry>, CliError> {
+    let mut out = Vec::with_capacity(args.init.len());
+    for entry in &args.init {
+        let Some((key, raw_value)) = entry.split_once('=') else {
+            return Err(CliError::CommandFailed(format!(
+                "invalid init entry '{entry}'; expected key=value"
+            )));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(CliError::CommandFailed(
+                "init entry key must not be empty".to_string(),
+            ));
+        }
+        out.push(InitEntry {
+            key: key.to_string(),
+            value: parse_init_value(raw_value.trim())?,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_init_value(raw: &str) -> Result<SignalValue, CliError> {
+    match raw {
+        "true" | "True" | "TRUE" => return Ok(SignalValue::Bool(true)),
+        "false" | "False" | "FALSE" => return Ok(SignalValue::Bool(false)),
+        _ => {}
+    }
+    if raw.contains(['.', 'e', 'E']) {
+        return raw
+            .parse::<f64>()
+            .map(SignalValue::F64)
+            .map_err(|_| CliError::CommandFailed(format!("invalid init value '{raw}'")));
+    }
+    let integer = raw
+        .parse::<i64>()
+        .map_err(|_| CliError::CommandFailed(format!("invalid init value '{raw}'")))?;
+    if let Ok(value) = u32::try_from(integer) {
+        return Ok(SignalValue::U32(value));
+    }
+    if let Ok(value) = i32::try_from(integer) {
+        return Ok(SignalValue::I32(value));
+    }
+    Err(CliError::CommandFailed(format!(
+        "init integer '{raw}' is outside supported i32/u32 range"
+    )))
+}
+
 fn parse_arb_id(value: &str) -> Result<u32, CliError> {
     let trimmed = value.trim();
     if let Some(hex) = trimmed
@@ -163,7 +214,7 @@ fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::args::{CanArgs, CliArgs, Command};
+    use crate::cli::args::{CanArgs, CliArgs, Command, LoadArgs};
 
     #[test]
     fn set_parser_accepts_single_pair() {
@@ -239,6 +290,7 @@ mod tests {
             session: "default".to_string(),
             libpath: None,
             env_tag: None,
+            init_config_json: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -262,6 +314,7 @@ mod tests {
             session: "default".to_string(),
             libpath: None,
             env_tag: None,
+            init_config_json: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -278,5 +331,35 @@ mod tests {
             message.contains("failed to resolve DBC path"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn load_request_parses_init_entries() {
+        let args = CliArgs {
+            daemon: false,
+            json: false,
+            session: "default".to_string(),
+            libpath: None,
+            env_tag: Some("bench".to_string()),
+            init_config_json: None,
+            config: None,
+            command: Some(Command::Load(LoadArgs {
+                libpath: "/tmp/libsim.dylib".to_string(),
+                init: vec![
+                    "demo.flag=true".to_string(),
+                    "demo.offset=1.5".to_string(),
+                    "demo.count=4".to_string(),
+                ],
+            })),
+        };
+        let request = to_request(&args).expect("load request should build");
+        let Action::Load { env_tag, init, .. } = request.action else {
+            panic!("expected load action");
+        };
+        assert_eq!(env_tag.as_deref(), Some("bench"));
+        assert_eq!(init.len(), 3);
+        assert_eq!(init[0].key, "demo.flag");
+        assert_eq!(init[1].key, "demo.offset");
+        assert_eq!(init[2].key, "demo.count");
     }
 }

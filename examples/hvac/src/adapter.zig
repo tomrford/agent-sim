@@ -1,6 +1,8 @@
+const std = @import("std");
 const sim_types = @import("sim_types.zig");
 
 pub const SimStatus = sim_types.SimStatus;
+pub const SimInitConfig = sim_types.SimInitConfig;
 pub const SimType = sim_types.SimType;
 pub const SimValue = sim_types.SimValue;
 pub const SimSignalDesc = sim_types.SimSignalDesc;
@@ -67,8 +69,9 @@ const signals = [_]SimSignalDesc{
 
 // -- Public API ---------------------------------------------------------------
 
-pub fn init(ctx: *Ctx) void {
+pub fn init(ctx: *Ctx, config: ?*const SimInitConfig) SimStatus {
     ctx.* = .{};
+    return applyInitConfig(ctx, config);
 }
 
 pub fn reset(ctx: *Ctx) void {
@@ -209,6 +212,67 @@ pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
     return .OK;
 }
 
+fn applyInitConfig(ctx: *Ctx, config: ?*const SimInitConfig) SimStatus {
+    const raw = config orelse return .OK;
+    var idx: u32 = 0;
+    while (idx < raw.count) : (idx += 1) {
+        const entry = raw.entries[idx];
+        const key = std.mem.span(entry.key);
+        const signal_id = signalIdByName(key) orelse return .INVALID_ARG;
+        const signal = signals[signal_id];
+        const coerced = coerceValue(entry.value, signal.type) orelse return .INVALID_ARG;
+        const status = write(ctx, signal_id, &coerced);
+        if (status != .OK) return status;
+    }
+    return .OK;
+}
+
+fn signalIdByName(name: []const u8) ?u32 {
+    for (signals, 0..) |signal, idx| {
+        if (std.mem.eql(u8, std.mem.span(signal.name), name)) {
+            return @intCast(idx);
+        }
+    }
+    return null;
+}
+
+fn coerceValue(value: SimValue, target: SimType) ?SimValue {
+    return switch (target) {
+        .BOOL => switch (value.type) {
+            .BOOL => value,
+            else => null,
+        },
+        .U32 => switch (value.type) {
+            .U32 => value,
+            .I32 => if (value.data.i32 >= 0) SimValue{ .type = .U32, .data = .{ .u32 = @intCast(value.data.i32) } } else null,
+            .F32 => floatToU32(value.data.f32),
+            .F64 => floatToU32(value.data.f64),
+            else => null,
+        },
+        .I32 => switch (value.type) {
+            .U32 => if (value.data.u32 <= std.math.maxInt(i32)) SimValue{ .type = .I32, .data = .{ .i32 = @intCast(value.data.u32) } } else null,
+            .I32 => value,
+            .F32 => floatToI32(value.data.f32),
+            .F64 => floatToI32(value.data.f64),
+            else => null,
+        },
+        .F32 => switch (value.type) {
+            .U32 => SimValue{ .type = .F32, .data = .{ .f32 = @floatFromInt(value.data.u32) } },
+            .I32 => SimValue{ .type = .F32, .data = .{ .f32 = @floatFromInt(value.data.i32) } },
+            .F32 => value,
+            .F64 => SimValue{ .type = .F32, .data = .{ .f32 = @floatCast(value.data.f64) } },
+            else => null,
+        },
+        .F64 => switch (value.type) {
+            .U32 => SimValue{ .type = .F64, .data = .{ .f64 = @floatFromInt(value.data.u32) } },
+            .I32 => SimValue{ .type = .F64, .data = .{ .f64 = @floatFromInt(value.data.i32) } },
+            .F32 => SimValue{ .type = .F64, .data = .{ .f64 = value.data.f32 } },
+            .F64 => value,
+            else => null,
+        },
+    };
+}
+
 // -- Internal -----------------------------------------------------------------
 
 fn driftToward(ctx: *Ctx) void {
@@ -220,4 +284,22 @@ fn driftToward(ctx: *Ctx) void {
     } else {
         ctx.current_temp = ctx.ambient_temp;
     }
+}
+
+fn floatToU32(raw: anytype) ?SimValue {
+    const Raw = @TypeOf(raw);
+    if (!std.math.isFinite(raw)) return null;
+    if (raw < 0 or raw > @as(Raw, @floatFromInt(std.math.maxInt(u32)))) return null;
+    const truncated = @trunc(raw);
+    if (truncated != raw) return null;
+    return SimValue{ .type = .U32, .data = .{ .u32 = @intFromFloat(truncated) } };
+}
+
+fn floatToI32(raw: anytype) ?SimValue {
+    const Raw = @TypeOf(raw);
+    if (!std.math.isFinite(raw)) return null;
+    if (raw < @as(Raw, @floatFromInt(std.math.minInt(i32))) or raw > @as(Raw, @floatFromInt(std.math.maxInt(i32)))) return null;
+    const truncated = @trunc(raw);
+    if (truncated != raw) return null;
+    return SimValue{ .type = .I32, .data = .{ .i32 = @intFromFloat(truncated) } };
 }

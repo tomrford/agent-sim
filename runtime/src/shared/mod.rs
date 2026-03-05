@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const WRITER_NAME_LEN: usize = 64;
+const MAX_SNAPSHOT_SPINS: usize = 32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -18,6 +19,26 @@ pub struct SharedRegion {
     mmap: MmapMut,
     slot_count: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedSnapshotError {
+    Busy { attempts: usize },
+}
+
+impl std::fmt::Display for SharedSnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy { attempts } => {
+                write!(
+                    f,
+                    "shared snapshot remained unstable after {attempts} read attempts"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SharedSnapshotError {}
 
 impl SharedRegion {
     pub fn open(
@@ -126,10 +147,11 @@ impl SharedRegion {
         Ok(())
     }
 
-    pub fn read_snapshot(&self) -> Vec<SimSharedSlot> {
-        for _ in 0..10 {
+    pub fn read_snapshot(&self) -> Result<Vec<SimSharedSlot>, SharedSnapshotError> {
+        for _ in 0..MAX_SNAPSHOT_SPINS {
             let before = self.generation();
             if !before.is_multiple_of(2) {
+                std::hint::spin_loop();
                 continue;
             }
             let snapshot = self
@@ -139,13 +161,13 @@ impl SharedRegion {
                 .collect::<Vec<_>>();
             let after = self.generation();
             if before == after && after.is_multiple_of(2) {
-                return snapshot;
+                return Ok(snapshot);
             }
+            std::hint::spin_loop();
         }
-        self.slot_storage()
-            .iter()
-            .filter_map(|slot| SimSharedSlot::from_raw(*slot))
-            .collect()
+        Err(SharedSnapshotError::Busy {
+            attempts: MAX_SNAPSHOT_SPINS,
+        })
     }
 
     fn byte_len(slot_count: usize) -> usize {
@@ -236,7 +258,9 @@ mod tests {
 
         let reader =
             SharedRegion::open(&path, 2, "writer", false).expect("reader should open region");
-        let snapshot = reader.read_snapshot();
+        let snapshot = reader
+            .read_snapshot()
+            .expect("snapshot should be consistent");
         assert_eq!(snapshot.len(), 2);
         assert!(snapshot.iter().any(|slot| slot.slot_id == 0));
         assert!(snapshot.iter().any(|slot| slot.slot_id == 1));
@@ -270,7 +294,9 @@ mod tests {
             region.generation().is_multiple_of(2),
             "generation must remain even after failed publish"
         );
-        let snapshot = region.read_snapshot();
+        let snapshot = region
+            .read_snapshot()
+            .expect("snapshot should remain readable after failed publish");
         assert!(
             snapshot
                 .iter()
@@ -300,12 +326,33 @@ mod tests {
             generation.is_multiple_of(2),
             "generation must remain even after wrapped publish"
         );
-        let snapshot = region.read_snapshot();
+        let snapshot = region
+            .read_snapshot()
+            .expect("snapshot should remain readable after wrapped publish");
         assert!(
             snapshot
                 .iter()
                 .any(|slot| slot.slot_id == 1 && slot.value == SignalValue::Bool(true)),
             "snapshot payload should remain readable after wrapped publish"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_fails_when_writer_never_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let path = dir.path().join("region.bin");
+        let mut region = SharedRegion::open(&path, 2, "writer", true)
+            .expect("shared region should open for writer");
+        region.set_generation(1);
+
+        let err = region
+            .read_snapshot()
+            .expect_err("reader should refuse unstable snapshot");
+        assert_eq!(
+            err,
+            SharedSnapshotError::Busy {
+                attempts: MAX_SNAPSHOT_SPINS
+            }
         );
     }
 }

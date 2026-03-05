@@ -69,3 +69,38 @@ fn close_all_closes_every_running_session() {
     assert!(err_a.contains("run `agent-sim load <libpath>` first"));
     assert!(err_b.contains("run `agent-sim load <libpath>` first"));
 }
+
+#[test]
+fn env_start_applies_init_config_before_first_tick() {
+    ensure_fixtures_built();
+    let session = unique_session("env-init");
+    let env_name = unique_session("cluster-init");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+sessions = [
+  {{ name = "{session}", lib = "{libpath}", init = {{ "demo.input" = 4.5 }} }},
+]
+"#
+    )
+    .expect("env config should be writable");
+    let cfg_path = cfg.path().display().to_string();
+
+    let _ = run_agent(&["--config", &cfg_path, "env", "start", &env_name]);
+    let _ = run_agent(&["--session", &session, "time", "step", "20us"]);
+    let output = run_agent(&["--session", &session, "get", "demo.output"]);
+    assert!(
+        output.contains("9"),
+        "expected init-configured output after first tick, got: {output}"
+    );
+
+    let _ = run_agent(&["close", "--env", &env_name]);
+}

@@ -1,3 +1,4 @@
+use crate::sim::init::InitEntry;
 use crate::sim::types::{SignalType, SignalValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,11 +28,16 @@ pub enum Action {
     Load {
         libpath: String,
         env_tag: Option<String>,
+        #[serde(default)]
+        init: Vec<InitEntry>,
     },
     Info,
     Signals,
     Reset,
     Get {
+        selectors: Vec<String>,
+    },
+    Sample {
         selectors: Vec<String>,
     },
     Set {
@@ -128,6 +134,11 @@ pub enum ResponseData {
     SignalValues {
         values: Vec<SignalValueData>,
     },
+    SignalSample {
+        tick: u64,
+        time_us: u64,
+        values: Vec<SignalValueData>,
+    },
     SetResult {
         writes_applied: usize,
     },
@@ -171,7 +182,7 @@ pub enum ResponseData {
         recipe: String,
         dry_run: bool,
         steps_executed: usize,
-        events: Vec<String>,
+        steps: Vec<RecipeStepResultData>,
     },
     SessionStatus {
         session: String,
@@ -246,6 +257,26 @@ pub struct SharedSlotValueData {
     pub slot_id: u32,
     pub signal_type: SignalType,
     pub value: SignalValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipeStepKindData {
+    Set,
+    Step,
+    Print,
+    Speed,
+    Reset,
+    Sleep,
+    Assert,
+    ForIteration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeStepResultData {
+    pub kind: RecipeStepKindData,
+    pub session: Option<String>,
+    pub detail: String,
 }
 
 pub fn parse_duration_us(input: &str) -> Result<u64, ProtocolError> {
