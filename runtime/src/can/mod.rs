@@ -187,7 +187,13 @@ impl CanSocket {
                     flags,
                     data: raw.data,
                 });
+                continue;
             }
+
+            return Err(format!(
+                "received unexpected CAN frame size {} bytes on '{}'",
+                read, self.iface
+            ));
         }
         Ok(frames)
     }

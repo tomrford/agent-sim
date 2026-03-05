@@ -835,11 +835,8 @@ fn write_can_signal(
         .and_then(|frames| frames.get(&signal.frame_key))
         .cloned()
         .unwrap_or_else(|| {
-            let mut data = [0_u8; 64];
+            let data = [0_u8; 64];
             let len = signal.message_size.min(64);
-            if len == 0 {
-                data[0] = 0;
-            }
             SimCanFrame {
                 arb_id: signal.arb_id,
                 len,
@@ -966,9 +963,8 @@ fn validate_can_frame(bus: &SimCanBusDesc, frame: &SimCanFrame) -> Result<(), St
         ));
     }
 
-    let fd_requested = (frame.flags & CAN_FLAG_FD) != 0
-        || frame.len > 8
-        || (frame.flags & (CAN_FLAG_BRS | CAN_FLAG_ESI)) != 0;
+    let fd_requested =
+        (frame.flags & CAN_FLAG_FD) != 0 || (frame.flags & (CAN_FLAG_BRS | CAN_FLAG_ESI)) != 0;
     if fd_requested {
         if !bus.fd_capable {
             return Err(format!(
