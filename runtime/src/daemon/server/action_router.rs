@@ -140,7 +140,6 @@ pub(super) async fn dispatch_action(
             })
         }
         Action::TimeStatus => {
-            reject_local_time_control(state)?;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
