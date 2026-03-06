@@ -73,7 +73,7 @@ impl RequestTransport {
 
         let mut attempt = 0_u32;
         loop {
-            match self.send_once(&socket, &payload).await {
+            match self.send_once(socket, &payload).await {
                 Ok(response) => return Ok(response),
                 Err(err) => {
                     attempt += 1;

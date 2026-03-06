@@ -504,12 +504,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             let bus_name = locate_schedule_bus(state, &job_id)?;
             let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
             let (_, schedule) = locate_schedule_mut(state, &job_id)?;
-            schedule.arb_id = arb_id;
-            schedule.flags = frame.flags;
-            schedule.data_hex = data_hex;
-            schedule.frame = frame;
-            schedule.every_ticks = every_ticks;
-            schedule.enabled = true;
+            update_schedule(schedule, arb_id, data_hex, frame, every_ticks);
             Ok(ResponseData::Ack)
         }
         Action::EnvCanScheduleRemove { env, job_id } => {
@@ -841,6 +836,20 @@ async fn send_action_success(instance: &str, action: Action) -> Result<(), Strin
     }
 }
 
+fn update_schedule(
+    schedule: &mut CanScheduleJob,
+    arb_id: u32,
+    data_hex: String,
+    frame: SimCanFrame,
+    every_ticks: u64,
+) {
+    schedule.arb_id = arb_id;
+    schedule.flags = frame.flags;
+    schedule.data_hex = data_hex;
+    schedule.frame = frame;
+    schedule.every_ticks = every_ticks;
+}
+
 async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), String> {
     std::fs::create_dir_all(crate::daemon::lifecycle::bootstrap_dir())
         .map_err(|err| format!("failed to create bootstrap dir: {err}"))?;
@@ -852,7 +861,7 @@ async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), S
     write_load_spec(&spec_path, &instance.load_spec).map_err(|err| err.to_string())?;
 
     let output =
-        std::process::Command::new(std::env::current_exe().map_err(|err| err.to_string())?)
+        tokio::process::Command::new(std::env::current_exe().map_err(|err| err.to_string())?)
             .arg("--bootstrap-instance")
             .arg("--instance")
             .arg(&instance.name)
@@ -861,6 +870,7 @@ async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), S
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .output()
+            .await
             .map_err(|err| format!("failed to bootstrap instance '{}': {err}", instance.name))?;
     let _ = std::fs::remove_file(&spec_path);
     if output.status.success() {
@@ -972,4 +982,52 @@ fn validate_can_frame(bus_name: &str, fd_capable: bool, frame: &SimCanFrame) -> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(arb_id: u32, flags: u8, data: &[u8]) -> SimCanFrame {
+        let mut payload = [0_u8; 64];
+        payload[..data.len()].copy_from_slice(data);
+        SimCanFrame {
+            arb_id,
+            len: data.len() as u8,
+            flags,
+            data: payload,
+        }
+    }
+
+    #[test]
+    fn schedule_update_preserves_enabled_state() {
+        let original_frame = frame(0x123, 0, &[0xAA, 0xBB]);
+        let mut schedule = CanScheduleJob {
+            job_id: "job-1".to_string(),
+            arb_id: original_frame.arb_id,
+            flags: original_frame.flags,
+            data_hex: "AABB".to_string(),
+            frame: original_frame,
+            every_ticks: 10,
+            next_due_tick: 5,
+            enabled: false,
+        };
+        let updated_frame = frame(0x456, CAN_FLAG_EXTENDED, &[0x01, 0x02, 0x03]);
+
+        update_schedule(
+            &mut schedule,
+            updated_frame.arb_id,
+            "010203".to_string(),
+            updated_frame,
+            42,
+        );
+
+        assert_eq!(schedule.arb_id, 0x456);
+        assert_eq!(schedule.flags, CAN_FLAG_EXTENDED);
+        assert_eq!(schedule.data_hex, "010203");
+        assert_eq!(schedule.every_ticks, 42);
+        assert!(!schedule.enabled);
+        assert_eq!(schedule.frame.len, 3);
+        assert_eq!(schedule.frame.payload(), &[0x01, 0x02, 0x03]);
+    }
 }
