@@ -240,7 +240,17 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
     let state = EnvState::bootstrap(socket_path.clone(), env_spec)
         .await
         .map_err(std::io::Error::other)?;
-    std::fs::write(pid_path(&state.name), std::process::id().to_string())?;
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(err) => {
+            cleanup_listener_runtime(&state.instances, &state.socket_path, &state.name).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = std::fs::write(pid_path(&state.name), std::process::id().to_string()) {
+        cleanup_listener_runtime(&state.instances, &state.socket_path, &state.name).await;
+        return Err(err);
+    }
 
     let state = Arc::new(Mutex::new(state));
     let tick_state = Arc::clone(&state);
@@ -248,12 +258,11 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
         run_tick_loop(tick_state).await;
     });
 
-    let listener = UnixListener::bind(&socket_path)?;
-    loop {
+    let result = loop {
         {
             let state = state.lock().await;
             if state.shutdown {
-                break;
+                break Ok(());
             }
         }
         match timeout(Duration::from_millis(100), listener.accept()).await {
@@ -264,23 +273,23 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
                 });
             }
             Ok(Err(err)) => {
-                return Err(err);
+                break Err(err);
             }
             Err(_) => {}
         }
-    }
+    };
 
     tick_task.abort();
-    let state = state.lock().await;
-    shutdown_instances(&state.instances).await;
-    if state.socket_path.exists() {
-        let _ = std::fs::remove_file(&state.socket_path);
-    }
-    let pid = pid_path(&state.name);
-    if pid.exists() {
-        let _ = std::fs::remove_file(pid);
-    }
-    Ok(())
+    let (instances, socket_path, env_name) = {
+        let state = state.lock().await;
+        (
+            state.instances.clone(),
+            state.socket_path.clone(),
+            state.name.clone(),
+        )
+    };
+    cleanup_listener_runtime(&instances, &socket_path, &env_name).await;
+    result
 }
 
 async fn handle_connection(
@@ -400,8 +409,9 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             let buses = state
                 .can_buses
                 .values()
-                .map(|bus| CanBusData {
-                    id: 0,
+                .enumerate()
+                .map(|(idx, bus)| CanBusData {
+                    id: u32::try_from(idx).unwrap_or(u32::MAX),
                     name: bus.name.clone(),
                     bitrate: bus.bitrate,
                     bitrate_data: bus.bitrate_data,
@@ -482,13 +492,15 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 next_due_tick,
                 enabled: true,
             };
+            ensure_unique_schedule_job_id(
+                state.can_buses.values().map(|bus| &bus.schedules),
+                &job_id,
+            )?;
             let bus = state
                 .can_buses
                 .get_mut(&bus_name)
                 .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-            if bus.schedules.insert(job_id.clone(), schedule).is_some() {
-                return Err(format!("CAN schedule '{job_id}' already exists"));
-            }
+            bus.schedules.insert(job_id, schedule);
             Ok(ResponseData::Ack)
         }
         Action::EnvCanScheduleUpdate {
@@ -799,6 +811,30 @@ fn locate_schedule_bus(state: &EnvState, job_id: &str) -> Result<String, String>
         .ok_or_else(|| format!("CAN schedule '{job_id}' not found"))
 }
 
+async fn cleanup_listener_runtime(instances: &[String], socket_path: &Path, env_name: &str) {
+    shutdown_instances(instances).await;
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(socket_path);
+    }
+    let pid = pid_path(env_name);
+    if pid.exists() {
+        let _ = std::fs::remove_file(pid);
+    }
+}
+
+fn ensure_unique_schedule_job_id<'a, I>(schedules: I, job_id: &str) -> Result<(), String>
+where
+    I: IntoIterator<Item = &'a BTreeMap<String, CanScheduleJob>>,
+{
+    if schedules
+        .into_iter()
+        .any(|schedule_map| schedule_map.contains_key(job_id))
+    {
+        return Err(format!("CAN schedule '{job_id}' already exists"));
+    }
+    Ok(())
+}
+
 fn frame_data(frame: &SimCanFrame) -> CanFrameData {
     CanFrameData {
         arb_id: frame.arb_id,
@@ -1068,5 +1104,27 @@ mod tests {
         start_schedule(&mut schedule);
 
         assert!(schedule.enabled);
+    }
+
+    #[test]
+    fn schedule_job_ids_must_be_unique_across_buses() {
+        let mut bus_a = BTreeMap::new();
+        let bus_b = BTreeMap::new();
+        bus_a.insert("job-1".to_string(), schedule(true));
+
+        let err = ensure_unique_schedule_job_id([&bus_a, &bus_b], "job-1").unwrap_err();
+
+        assert_eq!(err, "CAN schedule 'job-1' already exists");
+    }
+
+    #[test]
+    fn schedule_job_id_check_allows_new_ids() {
+        let mut bus_a = BTreeMap::new();
+        let bus_b = BTreeMap::new();
+        bus_a.insert("job-1".to_string(), schedule(true));
+
+        let result = ensure_unique_schedule_job_id([&bus_a, &bus_b], "job-2");
+
+        assert!(result.is_ok());
     }
 }
