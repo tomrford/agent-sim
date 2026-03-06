@@ -122,37 +122,22 @@ async fn run_watch_command(args: &CliArgs, watch: &WatchArgs) -> Result<ExitCode
 
 async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
     if let Some(env_name) = &close.env {
-        let request = Request {
-            id: Uuid::new_v4(),
-            action: Action::EnvClose {
-                env: env_name.clone(),
-            },
-        };
-        let response = send_env_request(env_name, &request)
-            .await
-            .map_err(|err| CliError::CommandFailed(err.to_string()))?;
-        if !response.success {
-            return Err(CliError::CommandFailed(response_error(&response)));
-        }
-        let env_socket = env_lifecycle::socket_path(env_name);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let running_instances = lifecycle::list_sessions()
-                .await
-                .map_err(|err| CliError::CommandFailed(err.to_string()))?
-                .into_iter()
-                .any(|(_, _, running, env)| running && env.as_deref() == Some(env_name.as_str()));
-            if !env_socket.exists() && !running_instances {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CliError::CommandFailed(format!(
-                    "timed out waiting for env '{env_name}' to shut down"
-                )));
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
+        close_env_and_wait(env_name).await?;
         return Ok(ExitCode::SUCCESS);
+    }
+
+    let env_targets = env_lifecycle::list_envs()
+        .await
+        .map_err(|err| CliError::CommandFailed(err.to_string()))?
+        .into_iter()
+        .filter(|(_, _, running)| *running)
+        .map(|(name, _, _)| name)
+        .collect::<Vec<_>>();
+    let mut close_errors = Vec::new();
+    for env_name in env_targets {
+        if let Err(err) = close_env_and_wait(&env_name).await {
+            close_errors.push(format!("env '{env_name}': {err}"));
+        }
     }
 
     let sessions = lifecycle::list_sessions()
@@ -174,7 +159,46 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
             let _ = lifecycle::kill_pid(pid);
         }
     }
+    if !close_errors.is_empty() {
+        return Err(CliError::CommandFailed(format!(
+            "close --all completed with env shutdown errors: {}",
+            close_errors.join("; ")
+        )));
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn close_env_and_wait(env_name: &str) -> Result<(), CliError> {
+    let request = Request {
+        id: Uuid::new_v4(),
+        action: Action::EnvClose {
+            env: env_name.to_string(),
+        },
+    };
+    let response = send_env_request(env_name, &request)
+        .await
+        .map_err(|err| CliError::CommandFailed(err.to_string()))?;
+    if !response.success {
+        return Err(CliError::CommandFailed(response_error(&response)));
+    }
+    let env_socket = env_lifecycle::socket_path(env_name);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let running_instances = lifecycle::list_sessions()
+            .await
+            .map_err(|err| CliError::CommandFailed(err.to_string()))?
+            .into_iter()
+            .any(|(_, _, running, env)| running && env.as_deref() == Some(env_name));
+        if !env_socket.exists() && !running_instances {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CliError::CommandFailed(format!(
+                "timed out waiting for env '{env_name}' to shut down"
+            )));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub(crate) async fn fetch_signal_sample(
