@@ -10,10 +10,9 @@ use crate::protocol::{
     ResponseData, parse_duration_us,
 };
 use crate::sim::time::TimeEngine;
-use crate::sim::types::{
-    CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RESERVED_MASK,
-    CAN_FLAG_RTR, SimCanFrame,
-};
+#[cfg(test)]
+use crate::sim::types::CAN_FLAG_EXTENDED;
+use crate::sim::types::SimCanFrame;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -306,17 +305,7 @@ async fn handle_connection(
         return Ok(());
     }
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => {
-            let id = request.id;
-            let result = {
-                let mut state = state.lock().await;
-                dispatch_action(request.action, &mut state).await
-            };
-            match result {
-                Ok(data) => Response::ok(id, data),
-                Err(err) => Response::err(id, err),
-            }
-        }
+        Ok(request) => dispatch_request(request, state).await,
         Err(err) => Response::err(uuid::Uuid::new_v4(), format!("invalid request json: {err}")),
     };
     drop(reader);
@@ -326,6 +315,44 @@ async fn handle_connection(
     payload.push('\n');
     stream.write_all(payload.as_bytes()).await?;
     Ok(())
+}
+
+async fn dispatch_request(request: Request, state: Arc<Mutex<EnvState>>) -> Response {
+    let id = request.id;
+    let result = match request.action {
+        Action::EnvTimeStep { env, duration } => dispatch_env_time_step(state, env, duration).await,
+        action => {
+            let mut state = state.lock().await;
+            dispatch_action(action, &mut state).await
+        }
+    };
+    match result {
+        Ok(data) => Response::ok(id, data),
+        Err(err) => Response::err(id, err),
+    }
+}
+
+async fn dispatch_env_time_step(
+    state: Arc<Mutex<EnvState>>,
+    env: String,
+    duration: String,
+) -> Result<ResponseData, String> {
+    let step = {
+        let mut state = state.lock().await;
+        ensure_env_name(&state, &env)?;
+        let duration_us = parse_duration_us(&duration).map_err(|err| err.to_string())?;
+        let tick_duration_us = state.tick_duration_us;
+        state
+            .time
+            .step_ticks(tick_duration_us, duration_us)
+            .map_err(|err| err.to_string())?
+    };
+    advance_due_ticks(Arc::clone(&state), step.advanced_ticks).await?;
+    Ok(ResponseData::TimeAdvanced {
+        requested_us: step.requested_us,
+        advanced_ticks: step.advanced_ticks,
+        advanced_us: step.advanced_us,
+    })
 }
 
 async fn run_tick_loop(state: Arc<Mutex<EnvState>>) {
@@ -388,6 +415,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             for instance in &state.instances {
                 send_action_success(instance, Action::Reset).await?;
             }
+            reset_env_can_state(state);
             state.time.reset();
             Ok(ResponseData::Ack)
         }
@@ -400,20 +428,6 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             ensure_env_name(state, &env)?;
             state.time.pause().map_err(|err| err.to_string())?;
             env_time_status(state)
-        }
-        Action::EnvTimeStep { env, duration } => {
-            ensure_env_name(state, &env)?;
-            let duration_us = parse_duration_us(&duration).map_err(|err| err.to_string())?;
-            let step = state
-                .time
-                .step_ticks(state.tick_duration_us, duration_us)
-                .map_err(|err| err.to_string())?;
-            advance_env_ticks(state, step.advanced_ticks).await?;
-            Ok(ResponseData::TimeAdvanced {
-                requested_us: step.requested_us,
-                advanced_ticks: step.advanced_ticks,
-                advanced_us: step.advanced_us,
-            })
         }
         Action::EnvTimeSpeed { env, multiplier } => {
             ensure_env_name(state, &env)?;
@@ -599,13 +613,6 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
     }
 }
 
-async fn advance_env_ticks(state: &mut EnvState, ticks: u64) -> Result<(), String> {
-    for _ in 0..ticks {
-        advance_single_tick(state).await?;
-    }
-    Ok(())
-}
-
 async fn advance_single_tick(state: &mut EnvState) -> Result<(), String> {
     let mut instance_rx: HashMap<String, HashMap<String, Vec<SimCanFrame>>> = HashMap::new();
     let current_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
@@ -777,7 +784,18 @@ fn duration_to_env_ticks(tick_duration_us: u32, raw: &str) -> Result<u64, String
         return Err("schedule period must be greater than zero".to_string());
     }
     let tick = u64::from(tick_duration_us.max(1));
-    Ok((duration_us / tick).max(1))
+    Ok(duration_us.div_ceil(tick))
+}
+
+fn reset_env_can_state(state: &mut EnvState) {
+    for bus in state.can_buses.values_mut() {
+        let _ = bus.socket.recv_all();
+        bus.latest_frames.clear();
+        bus.pending_delivery.clear();
+        for schedule in bus.schedules.values_mut() {
+            schedule.next_due_tick = 0;
+        }
+    }
 }
 
 fn parse_env_frame(
@@ -826,7 +844,7 @@ fn validate_env_frame(state: &EnvState, bus_name: &str, frame: &SimCanFrame) -> 
         .can_buses
         .get(bus_name)
         .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-    validate_can_frame(&bus.name, bus.fd_capable, frame)
+    crate::can::validate_frame(&bus.name, bus.fd_capable, frame)
 }
 
 fn locate_schedule_mut<'a>(
@@ -1029,64 +1047,6 @@ fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
     Ok(payload)
 }
 
-fn validate_can_frame(bus_name: &str, fd_capable: bool, frame: &SimCanFrame) -> Result<(), String> {
-    if (frame.flags & CAN_FLAG_RESERVED_MASK) != 0 {
-        return Err(format!(
-            "CAN frame for bus '{}' has reserved flag bits set",
-            bus_name
-        ));
-    }
-    if (frame.flags & CAN_FLAG_EXTENDED) != 0 {
-        if frame.arb_id > 0x1FFF_FFFF {
-            return Err(format!(
-                "CAN frame for bus '{}' has invalid extended arbitration id 0x{:X}",
-                bus_name, frame.arb_id
-            ));
-        }
-    } else if frame.arb_id > 0x7FF {
-        return Err(format!(
-            "CAN frame for bus '{}' has invalid standard arbitration id 0x{:X}",
-            bus_name, frame.arb_id
-        ));
-    }
-    if frame.len > 64 {
-        return Err(format!(
-            "CAN frame for bus '{}' has invalid payload length {}",
-            bus_name, frame.len
-        ));
-    }
-
-    let fd_requested =
-        (frame.flags & CAN_FLAG_FD) != 0 || (frame.flags & (CAN_FLAG_BRS | CAN_FLAG_ESI)) != 0;
-    if fd_requested {
-        if !fd_capable {
-            return Err(format!(
-                "CAN bus '{}' is classic-only and cannot carry FD frames",
-                bus_name
-            ));
-        }
-        if !matches!(frame.len, 0..=8 | 12 | 16 | 20 | 24 | 32 | 48 | 64) {
-            return Err(format!(
-                "CAN FD frame for bus '{}' has invalid length {}; valid lengths are 0-8,12,16,20,24,32,48,64",
-                bus_name, frame.len
-            ));
-        }
-        if (frame.flags & CAN_FLAG_RTR) != 0 {
-            return Err(format!(
-                "CAN FD frame for bus '{}' cannot set RTR flag",
-                bus_name
-            ));
-        }
-    } else if frame.len > 8 {
-        return Err(format!(
-            "classic CAN frame for bus '{}' has invalid length {}",
-            bus_name, frame.len
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,6 +1164,18 @@ mod tests {
         let result = ensure_unique_schedule_job_id([&bus_a, &bus_b], "job-2");
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn schedule_period_rounds_up_to_avoid_running_faster_than_requested() {
+        assert_eq!(
+            duration_to_env_ticks(20, "30us").expect("schedule period should convert"),
+            2
+        );
+        assert_eq!(
+            duration_to_env_ticks(20, "40us").expect("schedule period should convert"),
+            2
+        );
     }
 
     #[tokio::test]

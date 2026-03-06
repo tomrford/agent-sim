@@ -24,6 +24,10 @@ pub fn pid_path(env: &str) -> PathBuf {
     env_root().join(format!("{env}.pid"))
 }
 
+pub async fn list_envs() -> Result<Vec<(String, PathBuf, bool)>, EnvDaemonError> {
+    EnvRegistry.list_envs().await
+}
+
 pub async fn ensure_env_running(env: &str) -> Result<(), EnvDaemonError> {
     EnvRegistry.ensure_running(env).await
 }
@@ -36,6 +40,26 @@ pub async fn bootstrap_env_daemon(env_spec: &EnvSpec) -> Result<(), EnvDaemonErr
 pub struct EnvRegistry;
 
 impl EnvRegistry {
+    pub async fn list_envs(self) -> Result<Vec<(String, PathBuf, bool)>, EnvDaemonError> {
+        let root = env_root();
+        std::fs::create_dir_all(&root)?;
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("sock") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let running = can_connect(&path).await;
+            out.push((stem.to_string(), path, running));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     pub async fn ensure_running(self, env: &str) -> Result<(), EnvDaemonError> {
         std::fs::create_dir_all(env_root())?;
         let socket = socket_path(env);

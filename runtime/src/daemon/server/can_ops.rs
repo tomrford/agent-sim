@@ -1,9 +1,6 @@
 use super::DaemonState;
 use crate::can::dbc::frame_key_from_frame;
-use crate::sim::types::{
-    CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_EXTENDED, CAN_FLAG_FD, CAN_FLAG_RESERVED_MASK,
-    CAN_FLAG_RTR, SimCanBusDesc, SimCanFrame,
-};
+use crate::sim::types::{SimCanBusDesc, SimCanFrame};
 
 pub(super) fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
     let mut frame_updates = Vec::new();
@@ -13,7 +10,7 @@ pub(super) fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
             continue;
         }
         for frame in &frames {
-            validate_can_frame(&attachment.meta, frame)?;
+            crate::can::validate_frame(&attachment.meta.name, attachment.meta.fd_capable, frame)?;
             frame_updates.push((bus_name.clone(), frame.clone()));
         }
         state
@@ -35,7 +32,7 @@ pub(super) fn process_can_tx(state: &mut DaemonState) -> Result<(), String> {
             .can_tx(attachment.meta.id)
             .map_err(|e| format!("sim_can_tx failed for bus '{bus_name}': {e}"))?;
         for frame in tx_frames {
-            validate_can_frame(&attachment.meta, &frame)?;
+            crate::can::validate_frame(&attachment.meta.name, attachment.meta.fd_capable, &frame)?;
             attachment.socket.send(&frame)?;
             frame_updates.push((bus_name.clone(), frame));
         }
@@ -64,66 +61,32 @@ pub(super) fn record_frame(state: &mut DaemonState, bus_name: &str, frame: &SimC
     bus_frames.insert(frame_key_from_frame(frame), frame.clone());
 }
 
-pub(super) fn validate_can_frame(bus: &SimCanBusDesc, frame: &SimCanFrame) -> Result<(), String> {
-    if (frame.flags & CAN_FLAG_RESERVED_MASK) != 0 {
+pub(super) fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
+    let compact = raw
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_')
+        .collect::<String>();
+    if compact.len() % 2 != 0 {
         return Err(format!(
-            "CAN frame for bus '{}' has reserved flag bits set",
-            bus.name
+            "invalid CAN payload hex '{raw}': expected an even number of hex characters"
         ));
     }
-    if (frame.flags & CAN_FLAG_EXTENDED) != 0 {
-        if frame.arb_id > 0x1FFF_FFFF {
-            return Err(format!(
-                "CAN frame for bus '{}' has invalid extended arbitration id 0x{:X}",
-                bus.name, frame.arb_id
-            ));
-        }
-    } else if frame.arb_id > 0x7FF {
+    if compact.len() / 2 > 64 {
         return Err(format!(
-            "CAN frame for bus '{}' has invalid standard arbitration id 0x{:X}",
-            bus.name, frame.arb_id
+            "invalid CAN payload hex '{raw}': payload exceeds 64 bytes"
         ));
     }
-    if frame.len > 64 {
-        return Err(format!(
-            "CAN frame for bus '{}' has invalid payload length {}",
-            bus.name, frame.len
-        ));
+    let mut payload = Vec::with_capacity(compact.len() / 2);
+    let bytes = compact.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let pair = format!("{}{}", bytes[idx] as char, bytes[idx + 1] as char);
+        let value = u8::from_str_radix(&pair, 16)
+            .map_err(|_| format!("invalid CAN payload hex '{raw}': bad byte '{pair}'"))?;
+        payload.push(value);
+        idx += 2;
     }
-
-    let fd_requested =
-        (frame.flags & CAN_FLAG_FD) != 0 || (frame.flags & (CAN_FLAG_BRS | CAN_FLAG_ESI)) != 0;
-    if fd_requested {
-        if !bus.fd_capable {
-            return Err(format!(
-                "CAN bus '{}' is classic-only and cannot carry FD frames",
-                bus.name
-            ));
-        }
-        if !is_valid_can_fd_length(frame.len) {
-            return Err(format!(
-                "CAN FD frame for bus '{}' has invalid length {}; valid lengths are 0-8,12,16,20,24,32,48,64",
-                bus.name, frame.len
-            ));
-        }
-        if (frame.flags & CAN_FLAG_RTR) != 0 {
-            return Err(format!(
-                "CAN FD frame for bus '{}' cannot set RTR flag",
-                bus.name
-            ));
-        }
-    } else if frame.len > 8 {
-        return Err(format!(
-            "classic CAN frame for bus '{}' has invalid length {}",
-            bus.name, frame.len
-        ));
-    }
-
-    Ok(())
-}
-
-fn is_valid_can_fd_length(len: u8) -> bool {
-    matches!(len, 0..=8 | 12 | 16 | 20 | 24 | 32 | 48 | 64)
+    Ok(payload)
 }
 
 #[cfg(test)]

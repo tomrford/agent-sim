@@ -171,7 +171,7 @@ pub fn canonicalize_runtime_path(
     kind: &str,
 ) -> Result<String, String> {
     let candidate = resolve_runtime_path(raw_path, config_base_dir);
-    let canonical = canonicalize_existing_path(&candidate, kind)?;
+    let canonical = canonicalize_runtime_candidate(&candidate, kind)?;
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -210,6 +210,48 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, String
             path.display()
         )
     })
+}
+
+fn canonicalize_runtime_candidate(path: &Path, kind: &str) -> Result<PathBuf, String> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    if kind == "shared library" {
+        for fallback in shared_library_fallbacks(path) {
+            if let Ok(canonical) = std::fs::canonicalize(&fallback) {
+                return Ok(canonical);
+            }
+        }
+    }
+    canonicalize_existing_path(path, kind)
+}
+
+fn shared_library_fallbacks(path: &Path) -> Vec<PathBuf> {
+    let ext = native_shared_library_extension();
+    let mut out = Vec::new();
+    if path.extension().is_some() && path.extension().and_then(|value| value.to_str()) != Some(ext)
+    {
+        out.push(path.with_extension(ext));
+    }
+    if path.extension().is_none() {
+        out.push(PathBuf::from(format!("{}.{}", path.display(), ext)));
+    }
+    out
+}
+
+fn native_shared_library_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "dylib"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "so"
+    }
 }
 
 fn parse_cli_flash_entry(raw: &str) -> Result<(&str, Option<&str>), LoadResolveError> {
@@ -338,5 +380,58 @@ mod tests {
             err,
             LoadResolveError::Flash(FlashParseError::MissingBinaryBase)
         ));
+    }
+
+    #[test]
+    fn canonicalize_runtime_path_resolves_extensionless_shared_library() {
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let lib = temp
+            .path()
+            .join(format!("libdemo.{}", native_shared_library_extension()));
+        std::fs::write(&lib, b"fake").expect("shared library placeholder should be writable");
+
+        let resolved = canonicalize_runtime_path(
+            &temp.path().join("libdemo").to_string_lossy(),
+            None,
+            "shared library",
+        )
+        .expect("extensionless shared library path should resolve");
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&lib)
+                .expect("shared library should canonicalize")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn canonicalize_runtime_path_falls_back_to_native_shared_library_suffix() {
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let lib = temp
+            .path()
+            .join(format!("libdemo.{}", native_shared_library_extension()));
+        std::fs::write(&lib, b"fake").expect("shared library placeholder should be writable");
+
+        let requested = temp
+            .path()
+            .join(format!("libdemo.{}", non_native_shared_library_extension()));
+        let resolved =
+            canonicalize_runtime_path(&requested.to_string_lossy(), None, "shared library")
+                .expect("mismatched shared library suffix should resolve to native artifact");
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&lib)
+                .expect("shared library should canonicalize")
+                .to_string_lossy()
+        );
+    }
+
+    fn non_native_shared_library_extension() -> &'static str {
+        ["so", "dylib", "dll"]
+            .into_iter()
+            .find(|ext| *ext != native_shared_library_extension())
+            .expect("a non-native shared library extension should exist")
     }
 }
