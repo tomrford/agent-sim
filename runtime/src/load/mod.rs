@@ -65,6 +65,8 @@ pub enum FlashParseError {
     InvalidSrec { line: usize, message: String },
     #[error("failed to read flash file '{path}': {message}")]
     FileRead { path: String, message: String },
+    #[error("load spec '{path}': {message}")]
+    LoadSpec { path: String, message: String },
 }
 
 pub fn parse_address(raw: &str) -> Result<u32, FlashParseError> {
@@ -164,7 +166,7 @@ pub fn parse_intel_hex(content: &str) -> Result<Vec<ResolvedFlashRegion>, FlashP
                             .to_string(),
                     });
                 }
-                upper_addr = (((u32::from(data[0]) << 8) | u32::from(data[1])) << 4) & 0xFFFF_FFFF;
+                upper_addr = ((u32::from(data[0]) << 8) | u32::from(data[1])) << 4;
             }
             0x04 => {
                 if data.len() != 2 {
@@ -322,22 +324,22 @@ pub fn merge_regions(
 }
 
 pub fn read_load_spec(path: &Path) -> Result<LoadSpec, FlashParseError> {
-    let content = std::fs::read_to_string(path).map_err(|err| FlashParseError::FileRead {
+    let content = std::fs::read_to_string(path).map_err(|err| FlashParseError::LoadSpec {
         path: path.display().to_string(),
         message: err.to_string(),
     })?;
-    serde_json::from_str(&content).map_err(|err| FlashParseError::FileRead {
+    serde_json::from_str(&content).map_err(|err| FlashParseError::LoadSpec {
         path: path.display().to_string(),
         message: format!("invalid load spec json: {err}"),
     })
 }
 
 pub fn write_load_spec(path: &Path, spec: &LoadSpec) -> Result<(), FlashParseError> {
-    let content = serde_json::to_string(spec).map_err(|err| FlashParseError::FileRead {
+    let content = serde_json::to_string(spec).map_err(|err| FlashParseError::LoadSpec {
         path: path.display().to_string(),
         message: format!("failed to serialize load spec: {err}"),
     })?;
-    std::fs::write(path, content).map_err(|err| FlashParseError::FileRead {
+    std::fs::write(path, content).map_err(|err| FlashParseError::LoadSpec {
         path: path.display().to_string(),
         message: err.to_string(),
     })
@@ -386,7 +388,7 @@ impl FlashMemory {
                     previous_addr = addr;
                     current.push(value);
                 }
-                Some(base) if addr == previous_addr.saturating_add(1) => {
+                Some(_) if addr == previous_addr.saturating_add(1) => {
                     previous_addr = addr;
                     current.push(value);
                 }
@@ -424,7 +426,7 @@ fn ensure_address_range(base_addr: u32, len: usize) -> Result<(), FlashParseErro
 }
 
 fn decode_hex_bytes(raw: &str) -> Result<Vec<u8>, String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err("hex payload must contain an even number of digits".to_string());
     }
     let mut out = Vec::with_capacity(raw.len() / 2);
@@ -535,5 +537,42 @@ mod tests {
         assert_eq!(encode_inline_f32(3.5), 3.5_f32.to_le_bytes().to_vec());
         assert_eq!(encode_inline_bool(true), vec![1]);
         assert_eq!(encode_inline_bool(false), vec![0]);
+    }
+
+    #[test]
+    fn read_load_spec_reports_load_spec_context() {
+        let temp = tempfile::NamedTempFile::new().expect("temp file should be creatable");
+        std::fs::write(temp.path(), "{ not-json }").expect("temp file should be writable");
+
+        let err = read_load_spec(temp.path()).expect_err("invalid json must fail");
+
+        assert!(matches!(err, FlashParseError::LoadSpec { .. }));
+        let message = err.to_string();
+        assert!(message.contains("load spec"), "unexpected error: {message}");
+        assert!(
+            !message.contains("flash file"),
+            "error should not refer to flash files: {message}"
+        );
+    }
+
+    #[test]
+    fn write_load_spec_reports_load_spec_context() {
+        let temp = tempfile::tempdir().expect("temp dir should be creatable");
+        let missing_parent = temp.path().join("missing").join("spec.json");
+        let spec = LoadSpec {
+            libpath: "libsim.so".to_string(),
+            env_tag: Some("demo".to_string()),
+            flash: Vec::new(),
+        };
+
+        let err = write_load_spec(&missing_parent, &spec).expect_err("missing parent must fail");
+
+        assert!(matches!(err, FlashParseError::LoadSpec { .. }));
+        let message = err.to_string();
+        assert!(message.contains("load spec"), "unexpected error: {message}");
+        assert!(
+            !message.contains("flash file"),
+            "error should not refer to flash files: {message}"
+        );
     }
 }

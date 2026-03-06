@@ -107,6 +107,10 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                         env: name.clone(),
                         job_id: job_id.clone(),
                     },
+                    EnvCanScheduleCommand::Start { job_id } => Action::EnvCanScheduleStart {
+                        env: name.clone(),
+                        job_id: job_id.clone(),
+                    },
                     EnvCanScheduleCommand::List { bus } => Action::EnvCanScheduleList {
                         env: name.clone(),
                         bus_name: bus.clone(),
