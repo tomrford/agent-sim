@@ -75,10 +75,17 @@ impl SessionRegistry {
                 return Ok(());
             }
             if let Some(status) = child.try_wait()? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
+                let stderr = if let Some(mut pipe) = child.stderr.take() {
+                    tokio::task::spawn_blocking(move || {
+                        let mut stderr = String::new();
+                        let _ = pipe.read_to_string(&mut stderr);
+                        stderr
+                    })
+                    .await
+                    .unwrap_or_else(|_| String::new())
+                } else {
+                    String::new()
+                };
                 let _ = std::fs::remove_file(&bootstrap_path);
                 let details = stderr.trim();
                 let message = if details.is_empty() {
