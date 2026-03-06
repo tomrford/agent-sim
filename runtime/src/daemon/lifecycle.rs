@@ -91,7 +91,7 @@ impl SessionRegistry {
             sleep(Duration::from_millis(100)).await;
             waited += Duration::from_millis(100);
         }
-        let _ = std::fs::remove_file(&bootstrap_path);
+        cleanup_bootstrap_timeout(&mut child, &bootstrap_path);
         Err(DaemonError::StartupTimeout)
     }
 
@@ -142,8 +142,48 @@ pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool, Option<String
     SessionRegistry.list_sessions().await
 }
 
+fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &Path) {
+    let _ = std::fs::remove_file(bootstrap_path);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 async fn can_connect(socket: &Path) -> bool {
     UnixStream::connect(socket).await.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_bootstrap_timeout;
+    use std::process::{Command, Stdio};
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_cleanup_kills_child_and_removes_bootstrap_file() {
+        let bootstrap = tempfile::NamedTempFile::new().expect("temp bootstrap file");
+        let bootstrap_path = bootstrap.path().to_path_buf();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep child should spawn");
+
+        cleanup_bootstrap_timeout(&mut child, &bootstrap_path);
+
+        assert!(
+            !bootstrap_path.exists(),
+            "bootstrap file should be removed during timeout cleanup"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("child status should be queryable")
+                .is_some(),
+            "timed-out child should be reaped"
+        );
+    }
 }
 
 pub fn write_env_tag(session: &str, env: Option<&str>) -> Result<(), DaemonError> {
