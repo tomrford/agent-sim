@@ -51,9 +51,13 @@ pub fn ensure_fixtures_built() {
 }
 
 pub fn run_agent(args: &[&str]) -> String {
+    run_agent_in_home(&test_agent_sim_home(), args)
+}
+
+pub fn run_agent_in_home(home: &Path, args: &[&str]) -> String {
     let exe = resolve_agent_exe();
     let output = Command::new(exe)
-        .env("AGENT_SIM_HOME", test_agent_sim_home())
+        .env("AGENT_SIM_HOME", home)
         .args(args)
         .assert()
         .success()
@@ -65,9 +69,14 @@ pub fn run_agent(args: &[&str]) -> String {
 
 #[allow(dead_code)]
 pub fn run_agent_fail(args: &[&str]) -> String {
+    run_agent_fail_in_home(&test_agent_sim_home(), args)
+}
+
+#[allow(dead_code)]
+pub fn run_agent_fail_in_home(home: &Path, args: &[&str]) -> String {
     let exe = resolve_agent_exe();
     let output = Command::new(exe)
-        .env("AGENT_SIM_HOME", test_agent_sim_home())
+        .env("AGENT_SIM_HOME", home)
         .args(args)
         .assert()
         .failure()

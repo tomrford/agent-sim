@@ -146,3 +146,61 @@ instances = [
 
     let _ = run_agent(&["close", "--env", &env_name]);
 }
+
+#[test]
+#[serial]
+fn env_start_cleans_up_instances_when_env_socket_bind_fails() {
+    ensure_fixtures_built();
+    let home = tempfile::tempdir().expect("temp home should be creatable");
+    let session = unique_session("env-bind-cleanup");
+    let env_name = unique_session("cluster-bind-cleanup");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+instances = [
+  {{ name = "{session}", lib = "{libpath}" }},
+]
+"#
+    )
+    .expect("env config should be writable");
+    let cfg_path = cfg.path().display().to_string();
+
+    let occupied_socket_path = home.path().join("envs").join(format!("{env_name}.sock"));
+    std::fs::create_dir_all(&occupied_socket_path)
+        .expect("occupied socket path should be creatable");
+
+    let err = common::run_agent_fail_in_home(
+        home.path(),
+        &["--config", &cfg_path, "env", "start", &env_name],
+    );
+    assert!(
+        err.contains("env daemon startup failed"),
+        "unexpected env start error: {err}"
+    );
+
+    let status_err = common::run_agent_fail_in_home(home.path(), &["--instance", &session, "info"]);
+    assert!(
+        status_err.contains("run `agent-sim load <libpath>` first"),
+        "expected instance cleanup after env bind failure, got: {status_err}"
+    );
+    assert!(
+        !home.path().join(format!("{session}.pid")).exists(),
+        "instance pid should be removed after env bind failure"
+    );
+    assert!(
+        !home
+            .path()
+            .join("envs")
+            .join(format!("{env_name}.pid"))
+            .exists(),
+        "env pid should not be left behind after bind failure"
+    );
+}
