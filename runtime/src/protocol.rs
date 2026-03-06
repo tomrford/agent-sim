@@ -148,6 +148,10 @@ pub enum Action {
         env: String,
         job_id: String,
     },
+    EnvCanScheduleStart {
+        env: String,
+        job_id: String,
+    },
     EnvCanScheduleList {
         env: String,
         bus_name: Option<String>,

@@ -467,6 +467,7 @@ Examples of likely env-owned CAN operations:
 - `can schedule remove`
 - `can schedule list`
 - `can schedule stop`
+- `can schedule start`
 - `can buses`
 - `can trace` later
 

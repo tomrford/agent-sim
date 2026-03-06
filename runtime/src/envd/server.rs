@@ -523,6 +523,12 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             schedule.enabled = false;
             Ok(ResponseData::Ack)
         }
+        Action::EnvCanScheduleStart { env, job_id } => {
+            ensure_env_name(state, &env)?;
+            let (_, schedule) = locate_schedule_mut(state, &job_id)?;
+            start_schedule(schedule);
+            Ok(ResponseData::Ack)
+        }
         Action::EnvCanScheduleList { env, bus_name } => {
             ensure_env_name(state, &env)?;
             let schedules = state
@@ -850,6 +856,10 @@ fn update_schedule(
     schedule.every_ticks = every_ticks;
 }
 
+fn start_schedule(schedule: &mut CanScheduleJob) {
+    schedule.enabled = true;
+}
+
 async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), String> {
     std::fs::create_dir_all(crate::daemon::lifecycle::bootstrap_dir())
         .map_err(|err| format!("failed to create bootstrap dir: {err}"))?;
@@ -999,10 +1009,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn schedule_update_preserves_enabled_state() {
+    fn schedule(enabled: bool) -> CanScheduleJob {
         let original_frame = frame(0x123, 0, &[0xAA, 0xBB]);
-        let mut schedule = CanScheduleJob {
+        CanScheduleJob {
             job_id: "job-1".to_string(),
             arb_id: original_frame.arb_id,
             flags: original_frame.flags,
@@ -1010,8 +1019,13 @@ mod tests {
             frame: original_frame,
             every_ticks: 10,
             next_due_tick: 5,
-            enabled: false,
-        };
+            enabled,
+        }
+    }
+
+    #[test]
+    fn schedule_update_preserves_disabled_state() {
+        let mut schedule = schedule(false);
         let updated_frame = frame(0x456, CAN_FLAG_EXTENDED, &[0x01, 0x02, 0x03]);
 
         update_schedule(
@@ -1029,5 +1043,30 @@ mod tests {
         assert!(!schedule.enabled);
         assert_eq!(schedule.frame.len, 3);
         assert_eq!(schedule.frame.payload(), &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn schedule_update_preserves_enabled_state() {
+        let mut schedule = schedule(true);
+        let updated_frame = frame(0x456, CAN_FLAG_EXTENDED, &[0x01, 0x02, 0x03]);
+
+        update_schedule(
+            &mut schedule,
+            updated_frame.arb_id,
+            "010203".to_string(),
+            updated_frame,
+            42,
+        );
+
+        assert!(schedule.enabled);
+        assert_eq!(schedule.frame.payload(), &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn start_schedule_reenables_stopped_schedule() {
+        let mut schedule = schedule(false);
+        start_schedule(&mut schedule);
+
+        assert!(schedule.enabled);
     }
 }
