@@ -133,8 +133,11 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
         .filter(|(_, _, running)| *running)
         .map(|(name, _, _)| name)
         .collect::<Vec<_>>();
+    let mut close_errors = Vec::new();
     for env_name in env_targets {
-        close_env_and_wait(&env_name).await?;
+        if let Err(err) = close_env_and_wait(&env_name).await {
+            close_errors.push(format!("env '{env_name}': {err}"));
+        }
     }
 
     let sessions = lifecycle::list_sessions()
@@ -155,6 +158,12 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
         {
             let _ = lifecycle::kill_pid(pid);
         }
+    }
+    if !close_errors.is_empty() {
+        return Err(CliError::CommandFailed(format!(
+            "close --all completed with env shutdown errors: {}",
+            close_errors.join("; ")
+        )));
     }
     Ok(ExitCode::SUCCESS)
 }

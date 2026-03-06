@@ -415,7 +415,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             for instance in &state.instances {
                 send_action_success(instance, Action::Reset).await?;
             }
-            reset_env_can_state(state)?;
+            reset_env_can_state(state);
             state.time.reset();
             Ok(ResponseData::Ack)
         }
@@ -428,20 +428,6 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             ensure_env_name(state, &env)?;
             state.time.pause().map_err(|err| err.to_string())?;
             env_time_status(state)
-        }
-        Action::EnvTimeStep { env, duration } => {
-            ensure_env_name(state, &env)?;
-            let duration_us = parse_duration_us(&duration).map_err(|err| err.to_string())?;
-            let step = state
-                .time
-                .step_ticks(state.tick_duration_us, duration_us)
-                .map_err(|err| err.to_string())?;
-            advance_env_ticks(state, step.advanced_ticks).await?;
-            Ok(ResponseData::TimeAdvanced {
-                requested_us: step.requested_us,
-                advanced_ticks: step.advanced_ticks,
-                advanced_us: step.advanced_us,
-            })
         }
         Action::EnvTimeSpeed { env, multiplier } => {
             ensure_env_name(state, &env)?;
@@ -627,13 +613,6 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
     }
 }
 
-async fn advance_env_ticks(state: &mut EnvState, ticks: u64) -> Result<(), String> {
-    for _ in 0..ticks {
-        advance_single_tick(state).await?;
-    }
-    Ok(())
-}
-
 async fn advance_single_tick(state: &mut EnvState) -> Result<(), String> {
     let mut instance_rx: HashMap<String, HashMap<String, Vec<SimCanFrame>>> = HashMap::new();
     let current_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
@@ -808,16 +787,15 @@ fn duration_to_env_ticks(tick_duration_us: u32, raw: &str) -> Result<u64, String
     Ok(duration_us.div_ceil(tick))
 }
 
-fn reset_env_can_state(state: &mut EnvState) -> Result<(), String> {
+fn reset_env_can_state(state: &mut EnvState) {
     for bus in state.can_buses.values_mut() {
-        let _ = bus.socket.recv_all()?;
+        let _ = bus.socket.recv_all();
         bus.latest_frames.clear();
         bus.pending_delivery.clear();
         for schedule in bus.schedules.values_mut() {
             schedule.next_due_tick = 0;
         }
     }
-    Ok(())
 }
 
 fn parse_env_frame(
