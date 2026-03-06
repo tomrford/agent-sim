@@ -912,7 +912,33 @@ fn start_schedule(schedule: &mut CanScheduleJob) {
     schedule.enabled = true;
 }
 
+async fn run_bootstrap_instance_command(
+    exe: &Path,
+    instance_name: &str,
+    spec_path: &Path,
+) -> Result<std::process::Output, String> {
+    tokio::process::Command::new(exe)
+        .arg("--bootstrap-instance")
+        .arg("--instance")
+        .arg(instance_name)
+        .arg("--load-spec-path")
+        .arg(spec_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| format!("failed to bootstrap instance '{instance_name}': {err}"))
+}
+
 async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    bootstrap_instance_detached_with_exe(instance, &exe).await
+}
+
+async fn bootstrap_instance_detached_with_exe(
+    instance: &EnvInstanceSpec,
+    exe: &Path,
+) -> Result<(), String> {
     std::fs::create_dir_all(crate::daemon::lifecycle::bootstrap_dir())
         .map_err(|err| format!("failed to create bootstrap dir: {err}"))?;
     let spec_path = crate::daemon::lifecycle::bootstrap_dir().join(format!(
@@ -922,19 +948,9 @@ async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), S
     ));
     write_load_spec(&spec_path, &instance.load_spec).map_err(|err| err.to_string())?;
 
-    let output =
-        tokio::process::Command::new(std::env::current_exe().map_err(|err| err.to_string())?)
-            .arg("--bootstrap-instance")
-            .arg("--instance")
-            .arg(&instance.name)
-            .arg("--load-spec-path")
-            .arg(&spec_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(|err| format!("failed to bootstrap instance '{}': {err}", instance.name))?;
+    let output = run_bootstrap_instance_command(exe, &instance.name, &spec_path).await;
     let _ = std::fs::remove_file(&spec_path);
+    let output = output?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1049,6 +1065,7 @@ fn validate_can_frame(bus_name: &str, fd_capable: bool, frame: &SimCanFrame) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::load::LoadSpec;
     use crate::protocol::CanFrameWireData;
     use serial_test::serial;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1076,6 +1093,18 @@ mod tests {
             every_ticks: 10,
             next_due_tick: 5,
             enabled,
+        }
+    }
+
+    fn restore_agent_sim_home(original_home: Option<std::ffi::OsString>) {
+        if let Some(value) = original_home {
+            unsafe {
+                std::env::set_var("AGENT_SIM_HOME", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("AGENT_SIM_HOME");
+            }
         }
     }
 
@@ -1266,14 +1295,45 @@ mod tests {
                 .contains(&(instance.to_string(), "internal".to_string()))
         );
 
-        if let Some(value) = original_home {
-            unsafe {
-                std::env::set_var("AGENT_SIM_HOME", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("AGENT_SIM_HOME");
-            }
+        restore_agent_sim_home(original_home);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn bootstrap_instance_detached_removes_temp_file_when_spawn_fails() {
+        let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
+        let original_home = std::env::var_os("AGENT_SIM_HOME");
+        unsafe {
+            std::env::set_var("AGENT_SIM_HOME", home.path());
         }
+
+        let instance = EnvInstanceSpec {
+            name: "instance-a".to_string(),
+            load_spec: LoadSpec {
+                libpath: "/tmp/fake-lib.so".to_string(),
+                env_tag: Some("env-a".to_string()),
+                flash: Vec::new(),
+            },
+        };
+        let missing_exe = home.path().join("missing-bootstrap-binary");
+        let err = bootstrap_instance_detached_with_exe(&instance, &missing_exe)
+            .await
+            .expect_err("missing bootstrap binary should fail");
+        assert!(
+            err.contains("failed to bootstrap instance 'instance-a'"),
+            "unexpected error: {err}"
+        );
+
+        let bootstrap_dir = crate::daemon::lifecycle::bootstrap_dir();
+        let entries = std::fs::read_dir(&bootstrap_dir)
+            .expect("bootstrap dir should exist")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("bootstrap dir should be readable");
+        assert!(
+            entries.is_empty(),
+            "temp load specs should be cleaned up on spawn failure"
+        );
+
+        restore_agent_sim_home(original_home);
     }
 }

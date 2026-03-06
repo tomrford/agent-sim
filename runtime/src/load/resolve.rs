@@ -218,7 +218,7 @@ fn parse_cli_flash_entry(raw: &str) -> Result<(&str, Option<&str>), LoadResolveE
     };
     if maybe_base.starts_with("0x")
         || maybe_base.starts_with("0X")
-        || maybe_base.chars().all(|ch| ch.is_ascii_digit())
+        || (!maybe_base.is_empty() && maybe_base.chars().all(|ch| ch.is_ascii_digit()))
     {
         Ok((path, Some(maybe_base)))
     } else {
@@ -313,6 +313,10 @@ mod tests {
         assert_eq!(
             parse_cli_flash_entry("./blob.bin:0x08040000").expect("bin entry should parse"),
             ("./blob.bin", Some("0x08040000"))
+        );
+        assert_eq!(
+            parse_cli_flash_entry("./blob.bin:").expect("trailing colon should be treated as path"),
+            ("./blob.bin:", None)
         );
     }
 
