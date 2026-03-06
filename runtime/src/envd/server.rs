@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
+use tokio::task::yield_now;
 use tokio::time::{Duration, sleep, timeout};
 
 struct EnvState {
@@ -329,25 +330,46 @@ async fn handle_connection(
 
 async fn run_tick_loop(state: Arc<Mutex<EnvState>>) {
     loop {
-        let sleep_duration = {
+        let (tick_duration_us, due_ticks) = {
             let mut state = state.lock().await;
             if state.shutdown {
                 return;
             }
             let tick_duration_us = state.tick_duration_us;
             let due_ticks = state.time.tick_realtime_due(tick_duration_us);
-            // This lock currently spans per-instance RPCs inside `advance_env_ticks`.
-            // If env command latency becomes noticeable under catch-up, revisit with
-            // a split-state or actor-style tick loop rather than a piecemeal unlock.
-            if let Err(err) = advance_env_ticks(&mut state, due_ticks).await {
+            (tick_duration_us, due_ticks)
+        };
+        if let Err(err) = advance_due_ticks(Arc::clone(&state), due_ticks).await {
+            let mut state = state.lock().await;
+            if !state.shutdown {
                 tracing::error!("env '{}' tick loop failed: {err}", state.name);
                 state.shutdown = true;
+            }
+            return;
+        }
+        let sleep_duration = {
+            let state = state.lock().await;
+            if state.shutdown {
                 return;
             }
             state.time.realtime_poll_delay(tick_duration_us)
         };
         sleep(sleep_duration).await;
     }
+}
+
+async fn advance_due_ticks(state: Arc<Mutex<EnvState>>, due_ticks: u64) -> Result<(), String> {
+    for _ in 0..due_ticks {
+        {
+            let mut state = state.lock().await;
+            if state.shutdown {
+                return Ok(());
+            }
+            advance_single_tick(&mut state).await?;
+        }
+        yield_now().await;
+    }
+    Ok(())
 }
 
 async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<ResponseData, String> {
@@ -518,10 +540,11 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
         } => {
             ensure_env_name(state, &env)?;
             let every_ticks = duration_to_env_ticks(state.tick_duration_us, &every)?;
+            let current_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
             let bus_name = locate_schedule_bus(state, &job_id)?;
             let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
             let (_, schedule) = locate_schedule_mut(state, &job_id)?;
-            update_schedule(schedule, arb_id, data_hex, frame, every_ticks);
+            update_schedule(schedule, arb_id, data_hex, frame, every_ticks, current_tick);
             Ok(ResponseData::Ack)
         }
         Action::EnvCanScheduleRemove { env, job_id } => {
@@ -900,12 +923,14 @@ fn update_schedule(
     data_hex: String,
     frame: SimCanFrame,
     every_ticks: u64,
+    current_tick: u64,
 ) {
     schedule.arb_id = arb_id;
     schedule.flags = frame.flags;
     schedule.data_hex = data_hex;
     schedule.frame = frame;
     schedule.every_ticks = every_ticks;
+    schedule.next_due_tick = current_tick;
 }
 
 fn start_schedule(schedule: &mut CanScheduleJob) {
@@ -1119,12 +1144,14 @@ mod tests {
             "010203".to_string(),
             updated_frame,
             42,
+            17,
         );
 
         assert_eq!(schedule.arb_id, 0x456);
         assert_eq!(schedule.flags, CAN_FLAG_EXTENDED);
         assert_eq!(schedule.data_hex, "010203");
         assert_eq!(schedule.every_ticks, 42);
+        assert_eq!(schedule.next_due_tick, 17);
         assert!(!schedule.enabled);
         assert_eq!(schedule.frame.len, 3);
         assert_eq!(schedule.frame.payload(), &[0x01, 0x02, 0x03]);
@@ -1141,9 +1168,11 @@ mod tests {
             "010203".to_string(),
             updated_frame,
             42,
+            23,
         );
 
         assert!(schedule.enabled);
+        assert_eq!(schedule.next_due_tick, 23);
         assert_eq!(schedule.frame.payload(), &[0x01, 0x02, 0x03]);
     }
 
@@ -1175,6 +1204,43 @@ mod tests {
         let result = ensure_unique_schedule_job_id([&bus_a, &bus_b], "job-2");
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn advance_due_ticks_releases_lock_between_ticks() {
+        let state = Arc::new(Mutex::new(EnvState {
+            name: "env".to_string(),
+            socket_path: PathBuf::new(),
+            tick_duration_us: 20,
+            instances: Vec::new(),
+            time: TimeEngine::default(),
+            can_buses: BTreeMap::new(),
+            instance_bus_map: HashMap::new(),
+            ignored_instance_buses: HashSet::new(),
+            shutdown: false,
+        }));
+        let tick_state = Arc::clone(&state);
+        let tick_task = tokio::spawn(async move {
+            advance_due_ticks(tick_state, 1_024)
+                .await
+                .expect("due ticks should advance");
+        });
+
+        yield_now().await;
+
+        let mut state_guard = timeout(Duration::from_millis(100), state.lock())
+            .await
+            .expect("state lock should be acquirable during catch-up");
+        state_guard.shutdown = true;
+        drop(state_guard);
+
+        tick_task.await.expect("tick task should join");
+
+        let tick_count = state.lock().await.time.status(20).elapsed_ticks;
+        assert!(
+            tick_count < 1_024,
+            "expected shutdown to interrupt catch-up after lock interleaving, got {tick_count}"
+        );
     }
 
     #[test]
