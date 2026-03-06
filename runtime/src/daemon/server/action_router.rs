@@ -307,6 +307,7 @@ pub(super) async fn dispatch_action(
         | Action::EnvCanScheduleUpdate { .. }
         | Action::EnvCanScheduleRemove { .. }
         | Action::EnvCanScheduleStop { .. }
+        | Action::EnvCanScheduleStart { .. }
         | Action::EnvCanScheduleList { .. }
         | Action::EnvClose { .. } => Err("env-owned action sent to instance daemon".to_string()),
     }

@@ -8,7 +8,6 @@ mod shared_ops;
 mod tick_ops;
 
 use crate::can::CanSocket;
-use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{Request, Response};
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
@@ -29,7 +28,6 @@ pub struct DaemonState {
     project: Project,
     can_attached: HashMap<String, AttachedCanBus>,
     shared_attached: HashMap<String, AttachedSharedChannel>,
-    dbc_overlays: HashMap<String, DbcBusOverlay>,
     frame_state: HashMap<String, HashMap<u32, SimCanFrame>>,
     time: TimeEngine,
     shutdown: bool,
@@ -65,7 +63,6 @@ impl DaemonState {
             project,
             can_attached: HashMap::new(),
             shared_attached: HashMap::new(),
-            dbc_overlays: HashMap::new(),
             frame_state: HashMap::new(),
             time: TimeEngine::default(),
             shutdown: false,

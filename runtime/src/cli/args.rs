@@ -206,6 +206,9 @@ pub enum EnvCanScheduleCommand {
     Stop {
         job_id: String,
     },
+    Start {
+        job_id: String,
+    },
     List {
         bus: Option<String>,
     },
@@ -254,6 +257,42 @@ pub struct SetArgs {
     /// Either "<signal> <value>" or repeated "<signal>=<value>" pairs
     #[arg(required = true)]
     pub entries: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_can_schedule_start_parses() {
+        let args = CliArgs::try_parse_from([
+            "agent-sim",
+            "env",
+            "can",
+            "demo-env",
+            "schedule",
+            "start",
+            "job-1",
+        ])
+        .expect("schedule start command should parse");
+
+        let Some(Command::Env(EnvArgs {
+            command:
+                EnvCommand::Can {
+                    name,
+                    command:
+                        EnvCanCommand::Schedule {
+                            command: EnvCanScheduleCommand::Start { job_id },
+                        },
+                },
+        })) = args.command
+        else {
+            panic!("expected env can schedule start command");
+        };
+
+        assert_eq!(name, "demo-env");
+        assert_eq!(job_id, "job-1");
+    }
 }
 
 #[derive(Debug, Args)]
