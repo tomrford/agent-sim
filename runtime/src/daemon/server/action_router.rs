@@ -1,5 +1,7 @@
 use super::DaemonState;
 use super::{can_ops, shared_ops};
+use crate::can::CanSocket;
+use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
     Action, CanBusData, CanBusFramesData, InstanceInfoData, ResponseData, SharedChannelData,
     SharedSlotValueData, SignalData, SignalValueData, parse_duration_us,
@@ -174,7 +176,7 @@ pub(super) async fn dispatch_action(
                     .map(crate::sim::types::SimCanFrame::try_from)
                     .collect::<Result<Vec<_>, _>>()?;
                 for frame in &frames {
-                    can_ops::validate_can_frame(&meta, frame)?;
+                    crate::can::validate_frame(&meta.name, meta.fd_capable, frame)?;
                 }
                 state
                     .project
@@ -200,10 +202,60 @@ pub(super) async fn dispatch_action(
             state.time.advance_ticks(1);
             Ok(ResponseData::WorkerStep { can_tx })
         }
-        Action::CanBuses => Err(local_can_control_error()),
-        Action::CanAttach { .. } => Err(local_can_control_error()),
-        Action::CanDetach { .. } => Err(local_can_control_error()),
-        Action::CanLoadDbc { .. } => Err(local_can_control_error()),
+        Action::CanBuses => {
+            reject_local_can_control(state)?;
+            let buses = state
+                .project
+                .can_buses()
+                .iter()
+                .map(|bus| CanBusData {
+                    id: bus.id,
+                    name: bus.name.clone(),
+                    bitrate: bus.bitrate,
+                    bitrate_data: bus.bitrate_data,
+                    fd_capable: bus.fd_capable,
+                    attached_iface: state
+                        .can_attached
+                        .get(&bus.name)
+                        .map(|attached| attached.socket.iface().to_string()),
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::CanBuses { buses })
+        }
+        Action::CanAttach {
+            bus_name,
+            vcan_iface,
+        } => {
+            reject_local_can_control(state)?;
+            if state.can_attached.contains_key(&bus_name) {
+                return Err(format!("CAN bus '{bus_name}' is already attached"));
+            }
+            let meta = can_ops::find_can_bus_meta(state, &bus_name)?;
+            let socket = CanSocket::open(&vcan_iface, meta.fd_capable)?;
+            state
+                .can_attached
+                .insert(bus_name.clone(), super::AttachedCanBus { meta, socket });
+            Ok(ResponseData::Ack)
+        }
+        Action::CanDetach { bus_name } => {
+            reject_local_can_control(state)?;
+            if state.can_attached.remove(&bus_name).is_none() {
+                return Err(format!("CAN bus '{bus_name}' is not attached"));
+            }
+            state.dbc_overlays.remove(&bus_name);
+            Ok(ResponseData::Ack)
+        }
+        Action::CanLoadDbc { bus_name, path } => {
+            reject_local_can_control(state)?;
+            let _ = can_ops::find_can_bus_meta(state, &bus_name)?;
+            let overlay = DbcBusOverlay::load(Path::new(&path))?;
+            let signal_count = overlay.signal_names().count();
+            state.dbc_overlays.insert(bus_name.clone(), overlay);
+            Ok(ResponseData::DbcLoaded {
+                bus: bus_name,
+                signal_count,
+            })
+        }
         Action::SharedList => {
             let channels = state
                 .project
@@ -266,7 +318,35 @@ pub(super) async fn dispatch_action(
                 slots,
             })
         }
-        Action::CanSend { .. } => Err(local_can_control_error()),
+        Action::CanSend {
+            bus_name,
+            arb_id,
+            data_hex,
+            flags,
+        } => {
+            reject_local_can_control(state)?;
+            let attachment = state
+                .can_attached
+                .get(&bus_name)
+                .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
+            let payload = can_ops::parse_data_hex(&data_hex)?;
+            let mut data = [0_u8; 64];
+            data[..payload.len()].copy_from_slice(&payload);
+            let frame = crate::sim::types::SimCanFrame {
+                arb_id,
+                len: payload.len() as u8,
+                flags: flags.unwrap_or(0),
+                data,
+            };
+            crate::can::validate_frame(&attachment.meta.name, attachment.meta.fd_capable, &frame)?;
+            attachment.socket.send(&frame)?;
+            can_ops::record_frame(state, &bus_name, &frame);
+            Ok(ResponseData::CanSend {
+                bus: bus_name,
+                arb_id,
+                len: frame.len,
+            })
+        }
         Action::InstanceStatus => Ok(ResponseData::InstanceStatus {
             instance: state.session.clone(),
             socket_path: state.socket_path.display().to_string(),
@@ -379,6 +459,14 @@ fn reject_local_time_control(state: &DaemonState) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn reject_local_can_control(state: &DaemonState) -> Result<(), String> {
+    if state.env.is_some() {
+        Err(local_can_control_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn local_can_control_error() -> String {

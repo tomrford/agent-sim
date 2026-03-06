@@ -75,6 +75,47 @@ fn close_all_closes_every_running_session() {
 
 #[test]
 #[serial]
+fn close_all_closes_running_env_daemons_too() {
+    ensure_fixtures_built();
+    let session = unique_session("close-all-env");
+    let env_name = unique_session("close-all-env");
+    let libpath = template_lib_path().to_string_lossy().into_owned();
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+instances = [
+  {{ name = "{session}", lib = "{libpath}" }},
+]
+"#
+    )
+    .expect("env config should be writable");
+
+    let _ = run_agent(&[
+        "--config",
+        &cfg.path().display().to_string(),
+        "env",
+        "start",
+        &env_name,
+    ]);
+    let _ = run_agent(&["close", "--all"]);
+
+    let env_err = run_agent_fail(&["env", "status", &env_name]);
+    assert!(
+        env_err.contains("has no running daemon"),
+        "expected env daemon to stop after close --all, got: {env_err}"
+    );
+    let instance_err = run_agent_fail(&["--instance", &session, "info"]);
+    assert!(
+        instance_err.contains("run `agent-sim load <libpath>` first"),
+        "expected env instance to stop after close --all, got: {instance_err}"
+    );
+}
+
+#[test]
+#[serial]
 fn env_start_rejects_unknown_session_fields() {
     ensure_fixtures_built();
     let session = unique_session("env-init");

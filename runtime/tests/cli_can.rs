@@ -4,17 +4,17 @@ use common::{ensure_fixtures_built, run_agent, run_agent_fail, template_lib_path
 use std::io::Write;
 
 #[test]
-fn instance_can_commands_are_rejected_in_favor_of_env_can() {
+fn standalone_instance_can_buses_are_available() {
     ensure_fixtures_built();
-    let session = unique_session("can-reject");
+    let session = unique_session("can-standalone");
     let libpath = template_lib_path();
     let libpath = libpath.to_string_lossy().into_owned();
 
     let _ = run_agent(&["--instance", &session, "load", &libpath]);
-    let err = run_agent_fail(&["--instance", &session, "can", "buses"]);
+    let buses = run_agent(&["--instance", &session, "can", "buses"]);
     assert!(
-        err.contains("CAN is env-owned"),
-        "expected env-owned CAN rejection, got: {err}"
+        buses.contains("internal") && buses.contains("external"),
+        "expected standalone CAN bus output, got: {buses}"
     );
     let _ = run_agent(&["--instance", &session, "close"]);
 }
@@ -49,6 +49,11 @@ instances = [
     assert!(
         buses.contains("Bus") || buses.contains("ID"),
         "expected env CAN buses output, got: {buses}"
+    );
+    let err = run_agent_fail(&["--instance", &session, "can", "buses"]);
+    assert!(
+        err.contains("CAN is env-owned"),
+        "expected env-owned CAN rejection for attached instance, got: {err}"
     );
     let _ = run_agent(&["close", "--env", &env_name]);
 }

@@ -3,12 +3,12 @@ json = false
 speed = 1.0
 
 [defaults.load]
-lib = "./zig-out/lib/libsim_hvac_example.dylib"
+lib = "./zig-out/lib/libsim_hvac_example"
 
 # -- Devices ------------------------------------------------------------------
 
 [device.hvac]
-lib = "./zig-out/lib/libsim_hvac_example.dylib"
+lib = "./zig-out/lib/libsim_hvac_example"
 
 # -- Envs ---------------------------------------------------------------------
 

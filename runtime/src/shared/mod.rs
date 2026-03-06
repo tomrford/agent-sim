@@ -98,6 +98,8 @@ impl SharedRegion {
                 writer_session: encode_writer(writer_session),
             };
             Self::write_header(&mut mmap, &header);
+            let offset = std::mem::size_of::<SharedHeader>();
+            mmap[offset..].fill(0);
         } else {
             let header = Self::read_header(&mmap);
             if header.slot_count as usize != slot_count {
@@ -353,6 +355,32 @@ mod tests {
             SharedSnapshotError::Busy {
                 attempts: MAX_SNAPSHOT_SPINS
             }
+        );
+    }
+
+    #[test]
+    fn writer_reinitialization_clears_previous_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let path = dir.path().join("region.bin");
+        let mut writer =
+            SharedRegion::open(&path, 2, "writer", true).expect("writer should open shared region");
+        writer
+            .publish(&[SimSharedSlot {
+                slot_id: 0,
+                value: SignalValue::F32(9.5),
+            }])
+            .expect("publish should succeed");
+
+        let reopened = SharedRegion::open(&path, 2, "writer", true)
+            .expect("reinitialized writer should reopen shared region");
+        let snapshot = reopened
+            .read_snapshot()
+            .expect("reinitialized snapshot should be readable");
+        assert!(
+            !snapshot
+                .iter()
+                .any(|slot| slot.slot_id == 0 && slot.value == SignalValue::F32(9.5)),
+            "reinitializing a writer should clear any previous snapshot data"
         );
     }
 }
