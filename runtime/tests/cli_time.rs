@@ -49,7 +49,7 @@ fn step_while_running_is_rejected() {
 }
 
 #[test]
-fn env_time_controls_instances_and_rejects_local_time_commands() {
+fn env_time_controls_instances_but_allows_local_status_reads() {
     ensure_fixtures_built();
     let instance_a = unique_session("env-time-a");
     let instance_b = unique_session("env-time-b");
@@ -74,6 +74,12 @@ instances = [
     let _ = run_agent(&["--instance", &instance_a, "set", "demo.input", "3.0"]);
     let _ = run_agent(&["--instance", &instance_b, "set", "demo.input", "5.0"]);
 
+    let status_before = run_agent(&["--instance", &instance_a, "time", "status"]);
+    assert!(
+        status_before.contains("Ticks: 0"),
+        "expected readable local time status before env step, got: {status_before}"
+    );
+
     let err = run_agent_fail(&["--instance", &instance_a, "time", "step", "20us"]);
     assert!(
         err.contains("instance-local time control is unavailable"),
@@ -81,8 +87,18 @@ instances = [
     );
 
     let _ = run_agent(&["env", "time", &env_name, "step", "20us"]);
+    let env_status = run_agent(&["env", "time", &env_name, "status"]);
+    let status_after = run_agent(&["--instance", &instance_a, "time", "status"]);
     let out_a = run_agent(&["--instance", &instance_a, "get", "demo.output"]);
     let out_b = run_agent(&["--instance", &instance_b, "get", "demo.output"]);
+    assert!(
+        env_status.contains("Ticks: 1"),
+        "expected env time status to reflect the shared step, got: {env_status}"
+    );
+    assert!(
+        status_after.contains("Ticks: 1"),
+        "expected local time status to reflect env-managed stepping, got: {status_after}"
+    );
     assert!(
         out_a.contains("6"),
         "expected env step to advance instance A, got: {out_a}"
