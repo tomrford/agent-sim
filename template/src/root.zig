@@ -128,7 +128,7 @@ pub export fn sim_shared_write(channel_id: u32, out: ?[*]SimSharedSlot, capacity
     if (capacity > 0 and out == null) return .INVALID_ARG;
     if (capacity == 0) {
         written.* = 0;
-        return .OK;
+        return if (adapter.sharedChannelCount() == 0) .OK else .BUFFER_TOO_SMALL;
     }
     return adapter.sharedWrite(ctx, channel_id, out.?, capacity, written);
 }

@@ -1,6 +1,7 @@
 mod common;
 
 use common::{ensure_fixtures_built, run_agent, template_lib_path, unique_session};
+use serde_json::Value;
 use std::io::Write;
 
 #[test]
@@ -56,20 +57,25 @@ writer = "{writer_session}"
     let _ = run_agent(&["env", "time", &env_name, "step", "20us"]);
 
     let shared = run_agent(&[
+        "--json",
         "--instance",
         &reader_session,
         "shared",
         "get",
         "sensor_feed.*",
     ]);
-    assert!(
-        shared.contains("Slot"),
-        "expected slot table output from shared get, got: {shared}"
-    );
-    assert!(
-        shared.contains("slot") || shared.contains("Slot"),
-        "expected slot rows from shared get, got: {shared}"
-    );
+    let shared: Value =
+        serde_json::from_str(shared.trim()).expect("shared get should emit valid json");
+    let slots = shared["data"]["value"]["slots"]
+        .as_array()
+        .expect("shared get json should include slots array");
+    assert_eq!(slots.len(), 2, "shared snapshot should be dense");
+    assert_eq!(slots[0]["slot_id"], 0);
+    assert_eq!(slots[0]["signal_type"], "f32");
+    assert_eq!(slots[0]["value"], 3.0);
+    assert_eq!(slots[1]["slot_id"], 1);
+    assert_eq!(slots[1]["signal_type"], "f32");
+    assert_eq!(slots[1]["value"], 6.0);
 
     let _ = run_agent(&["close", "--env", &env_name]);
 }

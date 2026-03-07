@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::c_char;
+use thiserror::Error;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +313,18 @@ pub struct SimSharedSlot {
     pub value: SignalValue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SharedSlotDecodeError {
+    #[error("shared slot {slot_id} uses invalid type tag {signal_type}")]
+    InvalidTypeTag { slot_id: u32, signal_type: u32 },
+    #[error("shared slot {slot_id} has mismatched type tags: slot={slot_type} value={value_type}")]
+    MismatchedTypeTags {
+        slot_id: u32,
+        slot_type: u32,
+        value_type: u32,
+    },
+}
+
 impl SimSharedSlot {
     pub fn to_raw(&self) -> SimSharedSlotRaw {
         let raw = self.value.to_raw();
@@ -322,12 +335,68 @@ impl SimSharedSlot {
         }
     }
 
-    pub fn from_raw(raw: SimSharedSlotRaw) -> Option<Self> {
-        let mut value = raw.value;
-        value.signal_type = raw.signal_type;
-        Some(Self {
+    pub fn try_from_raw(raw: SimSharedSlotRaw) -> Result<Self, SharedSlotDecodeError> {
+        let slot_type = SimTypeRaw::try_from(raw.signal_type).map_err(|_| {
+            SharedSlotDecodeError::InvalidTypeTag {
+                slot_id: raw.slot_id,
+                signal_type: raw.signal_type,
+            }
+        })?;
+        let value_type = SimTypeRaw::try_from(raw.value.signal_type).map_err(|_| {
+            SharedSlotDecodeError::InvalidTypeTag {
+                slot_id: raw.slot_id,
+                signal_type: raw.value.signal_type,
+            }
+        })?;
+
+        if slot_type != value_type {
+            return Err(SharedSlotDecodeError::MismatchedTypeTags {
+                slot_id: raw.slot_id,
+                slot_type: raw.signal_type,
+                value_type: raw.value.signal_type,
+            });
+        }
+
+        Ok(Self {
             slot_id: raw.slot_id,
-            value: unsafe { SignalValue::from_raw(value) }?,
+            value: unsafe { SignalValue::from_raw(raw.value) }.expect("validated type tag"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SharedSlotDecodeError, SignalValue, SimSharedSlot, SimSharedSlotRaw, SimTypeRaw};
+
+    #[test]
+    fn shared_slot_decoding_rejects_mismatched_type_tags() {
+        let raw = SimSharedSlotRaw {
+            slot_id: 1,
+            signal_type: SimTypeRaw::Bool as u32,
+            value: SignalValue::F32(1.5).to_raw(),
+        };
+
+        let err = SimSharedSlot::try_from_raw(raw).expect_err("mismatched tags must fail");
+        assert_eq!(
+            err,
+            SharedSlotDecodeError::MismatchedTypeTags {
+                slot_id: 1,
+                slot_type: SimTypeRaw::Bool as u32,
+                value_type: SimTypeRaw::F32 as u32,
+            }
+        );
+    }
+
+    #[test]
+    fn shared_slot_decoding_accepts_matching_tags() {
+        let raw = SimSharedSlot {
+            slot_id: 3,
+            value: SignalValue::U32(42),
+        }
+        .to_raw();
+
+        let slot = SimSharedSlot::try_from_raw(raw).expect("matching tags must decode");
+        assert_eq!(slot.slot_id, 3);
+        assert_eq!(slot.value, SignalValue::U32(42));
     }
 }

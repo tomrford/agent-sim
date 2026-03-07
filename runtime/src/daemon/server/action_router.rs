@@ -281,12 +281,20 @@ pub(super) async fn dispatch_action(
                 ));
             }
             let meta = shared_ops::find_shared_channel_meta(state, &channel_name)?;
-            let region = SharedRegion::open(
+            let mut region = SharedRegion::open(
                 Path::new(&path),
                 meta.slot_count as usize,
                 &writer_session,
                 writer,
             )?;
+            if writer {
+                let snapshot = state.project.shared_write(meta.id).map_err(|e| {
+                    format!("sim_shared_write failed for channel '{channel_name}': {e}")
+                })?;
+                region.publish(&snapshot).map_err(|e| {
+                    format!("failed priming shared channel '{channel_name}' snapshot: {e}")
+                })?;
+            }
             state.shared_attached.insert(
                 channel_name.clone(),
                 super::AttachedSharedChannel {
