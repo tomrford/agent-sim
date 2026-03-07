@@ -3,20 +3,21 @@ use super::{can_ops, shared_ops};
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
-    Action, CanBusData, CanBusFramesData, InstanceInfoData, ResponseData, SharedChannelData,
-    SharedSlotValueData, SignalData, SignalValueData, parse_duration_us,
+    CanBusData, CanBusFramesData, InstanceAction, InstanceInfoData, ResponseData,
+    SharedChannelData, SharedSlotValueData, SignalData, SignalValueData, WorkerAction,
+    parse_duration_us,
 };
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
 use std::path::Path;
 
-pub(super) async fn dispatch_action(
-    action: Action,
+pub(super) async fn dispatch_instance_action(
+    action: InstanceAction,
     state: &mut DaemonState,
 ) -> Result<ResponseData, String> {
     match action {
-        Action::Ping => Ok(ResponseData::Ack),
-        Action::Load { load_spec } => {
+        InstanceAction::Ping => Ok(ResponseData::Ack),
+        InstanceAction::Load { load_spec } => {
             let bound = state.project.libpath.display().to_string();
             if load_spec.libpath != bound {
                 return Err(format!(
@@ -28,12 +29,12 @@ pub(super) async fn dispatch_action(
                 signal_count: state.project.signals().len(),
             })
         }
-        Action::Info => Ok(ResponseData::ProjectInfo {
+        InstanceAction::Info => Ok(ResponseData::ProjectInfo {
             libpath: state.project.libpath.display().to_string(),
             tick_duration_us: state.project.tick_duration_us(),
             signal_count: state.project.signals().len(),
         }),
-        Action::Signals => {
+        InstanceAction::Signals => {
             let signals = state
                 .project
                 .signals()
@@ -47,16 +48,16 @@ pub(super) async fn dispatch_action(
                 .collect::<Vec<_>>();
             Ok(ResponseData::Signals { signals })
         }
-        Action::Reset => {
+        InstanceAction::Reset => {
             state.project.reset().map_err(|e| e.to_string())?;
             state.time.reset();
             Ok(ResponseData::Ack)
         }
-        Action::Get { selectors } => {
+        InstanceAction::Get { selectors } => {
             let values = read_selected_signal_values(state, selectors)?;
             Ok(ResponseData::SignalValues { values })
         }
-        Action::Sample { selectors } => {
+        InstanceAction::Sample { selectors } => {
             let values = read_selected_signal_values(state, selectors)?;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::SignalSample {
@@ -65,7 +66,7 @@ pub(super) async fn dispatch_action(
                 values,
             })
         }
-        Action::Set { writes } => {
+        InstanceAction::Set { writes } => {
             let mut applied = 0_usize;
             for (selector, raw_value) in writes {
                 if selector.starts_with("can.") {
@@ -93,7 +94,7 @@ pub(super) async fn dispatch_action(
                 writes_applied: applied,
             })
         }
-        Action::TimeStart => {
+        InstanceAction::TimeStart => {
             reject_local_time_control(state)?;
             state.time.start().map_err(|e| e.to_string())?;
             let status = state.time.status(state.project.tick_duration_us());
@@ -104,7 +105,7 @@ pub(super) async fn dispatch_action(
                 speed: status.speed,
             })
         }
-        Action::TimePause => {
+        InstanceAction::TimePause => {
             reject_local_time_control(state)?;
             state.time.pause().map_err(|e| e.to_string())?;
             let status = state.time.status(state.project.tick_duration_us());
@@ -115,7 +116,7 @@ pub(super) async fn dispatch_action(
                 speed: status.speed,
             })
         }
-        Action::TimeStep { duration } => {
+        InstanceAction::TimeStep { duration } => {
             reject_local_time_control(state)?;
             let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
             let step = state
@@ -129,7 +130,7 @@ pub(super) async fn dispatch_action(
                 advanced_us: step.advanced_us,
             })
         }
-        Action::TimeSpeed { multiplier } => {
+        InstanceAction::TimeSpeed { multiplier } => {
             reject_local_time_control(state)?;
             if let Some(multiplier) = multiplier {
                 state
@@ -141,7 +142,7 @@ pub(super) async fn dispatch_action(
                 speed: state.time.speed(),
             })
         }
-        Action::TimeStatus => {
+        InstanceAction::TimeStatus => {
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
@@ -150,59 +151,7 @@ pub(super) async fn dispatch_action(
                 speed: status.speed,
             })
         }
-        Action::WorkerCanBuses => {
-            let buses = state
-                .project
-                .can_buses()
-                .iter()
-                .map(|bus| CanBusData {
-                    id: bus.id,
-                    name: bus.name.clone(),
-                    bitrate: bus.bitrate,
-                    bitrate_data: bus.bitrate_data,
-                    fd_capable: bus.fd_capable,
-                    attached_iface: None,
-                })
-                .collect::<Vec<_>>();
-            Ok(ResponseData::CanBuses { buses })
-        }
-        Action::WorkerStep { can_rx } => {
-            for batch in &can_rx {
-                let meta = can_ops::find_can_bus_meta(state, &batch.bus_name)?;
-                let frames = batch
-                    .frames
-                    .iter()
-                    .cloned()
-                    .map(crate::sim::types::SimCanFrame::try_from)
-                    .collect::<Result<Vec<_>, _>>()?;
-                for frame in &frames {
-                    crate::can::validate_frame(&meta.name, meta.fd_capable, frame)?;
-                }
-                state
-                    .project
-                    .can_rx(meta.id, &frames)
-                    .map_err(|e| format!("sim_can_rx failed for bus '{}': {e}", batch.bus_name))?;
-            }
-            shared_ops::process_shared_rx(state)?;
-            state.project.tick().map_err(|e| e.to_string())?;
-            let mut can_tx = Vec::new();
-            for bus in state.project.can_buses() {
-                let frames = state
-                    .project
-                    .can_tx(bus.id)
-                    .map_err(|e| format!("sim_can_tx failed for bus '{}': {e}", bus.name))?;
-                if !frames.is_empty() {
-                    can_tx.push(CanBusFramesData {
-                        bus_name: bus.name.clone(),
-                        frames: frames.iter().map(Into::into).collect(),
-                    });
-                }
-            }
-            shared_ops::process_shared_tx(state)?;
-            state.time.advance_ticks(1);
-            Ok(ResponseData::WorkerStep { can_tx })
-        }
-        Action::CanBuses => {
+        InstanceAction::CanBuses => {
             reject_local_can_control(state)?;
             let buses = state
                 .project
@@ -222,7 +171,7 @@ pub(super) async fn dispatch_action(
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanBuses { buses })
         }
-        Action::CanAttach {
+        InstanceAction::CanAttach {
             bus_name,
             vcan_iface,
         } => {
@@ -237,7 +186,7 @@ pub(super) async fn dispatch_action(
                 .insert(bus_name.clone(), super::AttachedCanBus { meta, socket });
             Ok(ResponseData::Ack)
         }
-        Action::CanDetach { bus_name } => {
+        InstanceAction::CanDetach { bus_name } => {
             reject_local_can_control(state)?;
             if state.can_attached.remove(&bus_name).is_none() {
                 return Err(format!("CAN bus '{bus_name}' is not attached"));
@@ -245,7 +194,7 @@ pub(super) async fn dispatch_action(
             state.dbc_overlays.remove(&bus_name);
             Ok(ResponseData::Ack)
         }
-        Action::CanLoadDbc { bus_name, path } => {
+        InstanceAction::CanLoadDbc { bus_name, path } => {
             reject_local_can_control(state)?;
             let _ = can_ops::find_can_bus_meta(state, &bus_name)?;
             let overlay = DbcBusOverlay::load(Path::new(&path))?;
@@ -256,8 +205,8 @@ pub(super) async fn dispatch_action(
                 signal_count,
             })
         }
-        Action::SharedList => {
-            let channels = state
+        InstanceAction::SharedList => {
+            let buses = state
                 .project
                 .shared_channels()
                 .iter()
@@ -267,9 +216,9 @@ pub(super) async fn dispatch_action(
                     slot_count: channel.slot_count,
                 })
                 .collect::<Vec<_>>();
-            Ok(ResponseData::SharedChannels { channels })
+            Ok(ResponseData::SharedChannels { channels: buses })
         }
-        Action::SharedAttach {
+        InstanceAction::SharedAttach {
             channel_name,
             path,
             writer,
@@ -305,7 +254,7 @@ pub(super) async fn dispatch_action(
             );
             Ok(ResponseData::Ack)
         }
-        Action::SharedGet { channel_name } => {
+        InstanceAction::SharedGet { channel_name } => {
             let attachment = state
                 .shared_attached
                 .get(&channel_name)
@@ -326,7 +275,7 @@ pub(super) async fn dispatch_action(
                 slots,
             })
         }
-        Action::CanSend {
+        InstanceAction::CanSend {
             bus_name,
             arb_id,
             data_hex,
@@ -355,13 +304,13 @@ pub(super) async fn dispatch_action(
                 len: frame.len,
             })
         }
-        Action::InstanceStatus => Ok(ResponseData::InstanceStatus {
+        InstanceAction::InstanceStatus => Ok(ResponseData::InstanceStatus {
             instance: state.session.clone(),
             socket_path: state.socket_path.display().to_string(),
             running: true,
             env: state.env.clone(),
         }),
-        Action::InstanceList => {
+        InstanceAction::InstanceList => {
             let instances = crate::daemon::lifecycle::list_instances()
                 .await
                 .map_err(|e| e.to_string())?
@@ -375,28 +324,70 @@ pub(super) async fn dispatch_action(
                 .collect::<Vec<_>>();
             Ok(ResponseData::InstanceList { instances })
         }
-        Action::Close => {
+        InstanceAction::Close => {
             state.shutdown = true;
             Ok(ResponseData::Ack)
         }
-        Action::EnvStatus { .. }
-        | Action::EnvReset { .. }
-        | Action::EnvTimeStart { .. }
-        | Action::EnvTimePause { .. }
-        | Action::EnvTimeStep { .. }
-        | Action::EnvTimeSpeed { .. }
-        | Action::EnvTimeStatus { .. }
-        | Action::EnvCanBuses { .. }
-        | Action::EnvCanLoadDbc { .. }
-        | Action::EnvCanSend { .. }
-        | Action::EnvCanInspect { .. }
-        | Action::EnvCanScheduleAdd { .. }
-        | Action::EnvCanScheduleUpdate { .. }
-        | Action::EnvCanScheduleRemove { .. }
-        | Action::EnvCanScheduleStop { .. }
-        | Action::EnvCanScheduleStart { .. }
-        | Action::EnvCanScheduleList { .. }
-        | Action::EnvClose { .. } => Err("env-owned action sent to instance daemon".to_string()),
+    }
+}
+
+pub(super) async fn dispatch_worker_action(
+    action: WorkerAction,
+    state: &mut DaemonState,
+) -> Result<ResponseData, String> {
+    match action {
+        WorkerAction::CanBuses => {
+            let buses = state
+                .project
+                .can_buses()
+                .iter()
+                .map(|bus| CanBusData {
+                    id: bus.id,
+                    name: bus.name.clone(),
+                    bitrate: bus.bitrate,
+                    bitrate_data: bus.bitrate_data,
+                    fd_capable: bus.fd_capable,
+                    attached_iface: None,
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::CanBuses { buses })
+        }
+        WorkerAction::Step { can_rx } => {
+            for batch in &can_rx {
+                let meta = can_ops::find_can_bus_meta(state, &batch.bus_name)?;
+                let frames = batch
+                    .frames
+                    .iter()
+                    .cloned()
+                    .map(crate::sim::types::SimCanFrame::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                for frame in &frames {
+                    crate::can::validate_frame(&meta.name, meta.fd_capable, frame)?;
+                }
+                state
+                    .project
+                    .can_rx(meta.id, &frames)
+                    .map_err(|e| format!("sim_can_rx failed for bus '{}': {e}", batch.bus_name))?;
+            }
+            shared_ops::process_shared_rx(state)?;
+            state.project.tick().map_err(|e| e.to_string())?;
+            let mut can_tx = Vec::new();
+            for bus in state.project.can_buses() {
+                let frames = state
+                    .project
+                    .can_tx(bus.id)
+                    .map_err(|e| format!("sim_can_tx failed for bus '{}': {e}", bus.name))?;
+                if !frames.is_empty() {
+                    can_tx.push(CanBusFramesData {
+                        bus_name: bus.name.clone(),
+                        frames: frames.iter().map(Into::into).collect(),
+                    });
+                }
+            }
+            shared_ops::process_shared_tx(state)?;
+            state.time.advance_ticks(1);
+            Ok(ResponseData::WorkerStep { can_tx })
+        }
     }
 }
 

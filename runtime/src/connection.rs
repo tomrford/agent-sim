@@ -2,7 +2,7 @@ use crate::daemon::error::DaemonError;
 use crate::daemon::lifecycle::{bootstrap_daemon, ensure_daemon_running, socket_path};
 use crate::envd::error::EnvDaemonError;
 use crate::envd::lifecycle::{ensure_env_running, socket_path as env_socket_path};
-use crate::protocol::{Action, Request, Response};
+use crate::protocol::{InstanceAction, Request, RequestAction, Response};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -117,7 +117,7 @@ struct SessionConnector;
 impl SessionConnector {
     async fn prepare(self, session: &str, request: &Request) -> Result<(), ConnectionError> {
         match &request.action {
-            Action::Load { load_spec } => {
+            RequestAction::Instance(InstanceAction::Load { load_spec }) => {
                 bootstrap_daemon(session, load_spec).await?;
             }
             _ => ensure_daemon_running(session).await?,

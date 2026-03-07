@@ -13,7 +13,10 @@ use crate::connection::{send_env_request, send_request};
 use crate::daemon::lifecycle::{self, bootstrap_daemon};
 use crate::envd::lifecycle as env_lifecycle;
 use crate::load::resolve::resolve_standalone_load_spec;
-use crate::protocol::{Action, Request, Response, ResponseData, SignalValueData, WatchSampleData};
+use crate::protocol::{
+    EnvAction, InstanceAction, Request, RequestAction, Response, ResponseData, SignalValueData,
+    WatchSampleData,
+};
 use std::path::Path;
 use std::process::ExitCode;
 use tokio::time::{Duration, sleep};
@@ -74,7 +77,7 @@ async fn run_load_command(
     bootstrap_daemon(&args.instance, &load_spec)
         .await
         .map_err(|err| CliError::CommandFailed(err.to_string()))?;
-    let response = send_action(&args.instance, Action::Info).await?;
+    let response = send_action(&args.instance, InstanceAction::Info).await?;
     let ResponseData::ProjectInfo {
         libpath,
         signal_count,
@@ -151,7 +154,7 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
     targets.sort();
 
     for session_name in targets {
-        if send_action_success(&session_name, Action::Close)
+        if send_action_success(&session_name, InstanceAction::Close)
             .await
             .is_err()
             && let Some(pid) = lifecycle::read_pid(&session_name)
@@ -171,9 +174,9 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
 async fn close_env_and_wait(env_name: &str) -> Result<(), CliError> {
     let request = Request {
         id: Uuid::new_v4(),
-        action: Action::EnvClose {
+        action: RequestAction::Env(EnvAction::Close {
             env: env_name.to_string(),
-        },
+        }),
     };
     let response = send_env_request(env_name, &request)
         .await
@@ -207,7 +210,7 @@ pub(crate) async fn fetch_signal_sample(
 ) -> Result<(u64, u64, SignalValueData), CliError> {
     let response = send_action(
         session,
-        Action::Sample {
+        InstanceAction::Sample {
             selectors: vec![selector.to_string()],
         },
     )
@@ -235,7 +238,10 @@ pub(crate) async fn fetch_signal_sample(
     }
 }
 
-pub(crate) async fn send_action_success(session: &str, action: Action) -> Result<(), CliError> {
+pub(crate) async fn send_action_success(
+    session: &str,
+    action: InstanceAction,
+) -> Result<(), CliError> {
     let response = send_action(session, action).await?;
     if response.success {
         Ok(())
@@ -244,10 +250,13 @@ pub(crate) async fn send_action_success(session: &str, action: Action) -> Result
     }
 }
 
-pub(crate) async fn send_action(session: &str, action: Action) -> Result<Response, CliError> {
+pub(crate) async fn send_action(
+    session: &str,
+    action: InstanceAction,
+) -> Result<Response, CliError> {
     let request = Request {
         id: Uuid::new_v4(),
-        action,
+        action: RequestAction::Instance(action),
     };
     send_request(session, &request)
         .await

@@ -13,7 +13,7 @@ use crate::envd::spec::{
     EnvSharedChannelSpec, EnvSpec,
 };
 use crate::load::resolve::{canonicalize_runtime_path, resolve_env_load_specs};
-use crate::protocol::{Action, Request};
+use crate::protocol::{EnvAction, Request, RequestAction};
 use std::path::Path;
 use std::process::ExitCode;
 use uuid::Uuid;
@@ -22,31 +22,31 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
     match &env.command {
         EnvCommand::Start { name } => run_env_start(args, name).await,
         EnvCommand::Status { name } => {
-            run_env_action(args, name, Action::EnvStatus { env: name.clone() }).await
+            run_env_action(args, name, EnvAction::Status { env: name.clone() }).await
         }
         EnvCommand::Reset { name } => {
-            run_env_action(args, name, Action::EnvReset { env: name.clone() }).await
+            run_env_action(args, name, EnvAction::Reset { env: name.clone() }).await
         }
         EnvCommand::Time { name, command } => {
             let action = match command {
-                TimeCommand::Start => Action::EnvTimeStart { env: name.clone() },
-                TimeCommand::Pause => Action::EnvTimePause { env: name.clone() },
-                TimeCommand::Step { duration } => Action::EnvTimeStep {
+                TimeCommand::Start => EnvAction::TimeStart { env: name.clone() },
+                TimeCommand::Pause => EnvAction::TimePause { env: name.clone() },
+                TimeCommand::Step { duration } => EnvAction::TimeStep {
                     env: name.clone(),
                     duration: duration.clone(),
                 },
-                TimeCommand::Speed { multiplier } => Action::EnvTimeSpeed {
+                TimeCommand::Speed { multiplier } => EnvAction::TimeSpeed {
                     env: name.clone(),
                     multiplier: *multiplier,
                 },
-                TimeCommand::Status => Action::EnvTimeStatus { env: name.clone() },
+                TimeCommand::Status => EnvAction::TimeStatus { env: name.clone() },
             };
             run_env_action(args, name, action).await
         }
         EnvCommand::Can { name, command } => {
             let action = match command {
-                EnvCanCommand::Buses => Action::EnvCanBuses { env: name.clone() },
-                EnvCanCommand::LoadDbc { bus, path } => Action::EnvCanLoadDbc {
+                EnvCanCommand::Buses => EnvAction::CanBuses { env: name.clone() },
+                EnvCanCommand::LoadDbc { bus, path } => EnvAction::CanLoadDbc {
                     env: name.clone(),
                     bus_name: bus.clone(),
                     path: canonicalize_runtime_path(path, None, "DBC")
@@ -57,14 +57,14 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                     arb_id,
                     data_hex,
                     flags,
-                } => Action::EnvCanSend {
+                } => EnvAction::CanSend {
                     env: name.clone(),
                     bus_name: bus.clone(),
                     arb_id: super::commands::parse_arb_id(arb_id)?,
                     data_hex: data_hex.clone(),
                     flags: *flags,
                 },
-                EnvCanCommand::Inspect { bus } => Action::EnvCanInspect {
+                EnvCanCommand::Inspect { bus } => EnvAction::CanInspect {
                     env: name.clone(),
                     bus_name: bus.clone(),
                 },
@@ -76,7 +76,7 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                         every,
                         job_id,
                         flags,
-                    } => Action::EnvCanScheduleAdd {
+                    } => EnvAction::CanScheduleAdd {
                         env: name.clone(),
                         bus_name: bus.clone(),
                         job_id: job_id.clone(),
@@ -91,7 +91,7 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                         data_hex,
                         every,
                         flags,
-                    } => Action::EnvCanScheduleUpdate {
+                    } => EnvAction::CanScheduleUpdate {
                         env: name.clone(),
                         job_id: job_id.clone(),
                         arb_id: super::commands::parse_arb_id(arb_id)?,
@@ -99,19 +99,19 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                         every: every.clone(),
                         flags: *flags,
                     },
-                    EnvCanScheduleCommand::Remove { job_id } => Action::EnvCanScheduleRemove {
+                    EnvCanScheduleCommand::Remove { job_id } => EnvAction::CanScheduleRemove {
                         env: name.clone(),
                         job_id: job_id.clone(),
                     },
-                    EnvCanScheduleCommand::Stop { job_id } => Action::EnvCanScheduleStop {
+                    EnvCanScheduleCommand::Stop { job_id } => EnvAction::CanScheduleStop {
                         env: name.clone(),
                         job_id: job_id.clone(),
                     },
-                    EnvCanScheduleCommand::Start { job_id } => Action::EnvCanScheduleStart {
+                    EnvCanScheduleCommand::Start { job_id } => EnvAction::CanScheduleStart {
                         env: name.clone(),
                         job_id: job_id.clone(),
                     },
-                    EnvCanScheduleCommand::List { bus } => Action::EnvCanScheduleList {
+                    EnvCanScheduleCommand::List { bus } => EnvAction::CanScheduleList {
                         env: name.clone(),
                         bus_name: bus.clone(),
                     },
@@ -148,7 +148,7 @@ async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliEr
     run_env_action(
         args,
         env_name,
-        Action::EnvStatus {
+        EnvAction::Status {
             env: env_name.to_string(),
         },
     )
@@ -294,11 +294,11 @@ fn parse_env_member(member: &str, default_bus_name: &str) -> Result<(String, Str
 async fn run_env_action(
     args: &CliArgs,
     env_name: &str,
-    action: Action,
+    action: EnvAction,
 ) -> Result<ExitCode, CliError> {
     let request = Request {
         id: Uuid::new_v4(),
-        action,
+        action: RequestAction::Env(action),
     };
     let response = send_env_request(env_name, &request)
         .await
