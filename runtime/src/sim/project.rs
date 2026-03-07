@@ -6,6 +6,9 @@ use crate::sim::types::{
     SimCanFrameRaw, SimSharedDesc, SimSharedDescRaw, SimSharedSlot, SimSharedSlotRaw,
     SimSignalDescRaw, SimValueRaw,
 };
+use crate::sim::validation::{
+    validate_can_metadata, validate_shared_metadata, validate_signal_metadata,
+};
 use libloading::Library;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -169,17 +172,22 @@ impl Project {
                     .into_iter()
                     .map(|entry| {
                         let name = decode_owned_cstr(entry.name, "signal name")
-                            .map_err(|_| ProjectError::InvalidSignalMetadata)?;
+                            .map_err(ProjectError::InvalidSignalMetadata)?;
                         let units = if entry.units.is_null() {
                             None
                         } else {
                             Some(
                                 decode_owned_cstr(entry.units, "signal units")
-                                    .map_err(|_| ProjectError::InvalidSignalMetadata)?,
+                                    .map_err(ProjectError::InvalidSignalMetadata)?,
                             )
                         };
-                        let signal_type = SignalType::try_from(entry.signal_type)
-                            .map_err(|_| ProjectError::InvalidSignalMetadata)?;
+                        let signal_type =
+                            SignalType::try_from(entry.signal_type).map_err(|_| {
+                                ProjectError::InvalidSignalMetadata(format!(
+                                    "signal '{}' uses invalid type tag {}",
+                                    name, entry.signal_type
+                                ))
+                            })?;
                         Ok(SignalMeta {
                             id: entry.id,
                             name,
@@ -262,16 +270,14 @@ impl Project {
                         ));
             }
         };
+        validate_signal_metadata(&signals)?;
+        validate_can_metadata(&can_buses)?;
+        validate_shared_metadata(&shared_channels)?;
 
         let signal_name_to_id = signals
             .iter()
             .map(|s| (s.name.clone(), s.id))
             .collect::<HashMap<_, _>>();
-        if signals.iter().any(|signal| signal.name.starts_with("can.")) {
-            return Err(ProjectError::LibraryLoad(
-                "signal names starting with 'can.' are reserved for DBC overlays".to_string(),
-            ));
-        }
         let signal_id_to_index = signals
             .iter()
             .enumerate()
@@ -323,6 +329,12 @@ impl Project {
 
     pub fn signal_id_by_name(&self, name: &str) -> Option<u32> {
         self.signal_name_to_id.get(name).copied()
+    }
+
+    fn shared_channel_by_id(&self, channel_id: u32) -> Option<&SimSharedDesc> {
+        self.shared_channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
     }
 
     pub(crate) fn reset(&self) -> Result<(), SimError> {
@@ -397,9 +409,13 @@ impl Project {
         let Some(shared_api) = &self.shared_api else {
             return Ok(());
         };
-        if slots.is_empty() {
-            return Ok(());
-        }
+        let expected_slot_count = self
+            .shared_channel_by_id(channel_id)
+            .ok_or_else(|| {
+                SimError::FfiContract(format!("unknown shared channel id {channel_id}"))
+            })?
+            .slot_count as usize;
+        validate_dense_shared_snapshot(slots, expected_slot_count, "sim_shared_read")?;
         let raw_slots = slots.iter().map(SimSharedSlot::to_raw).collect::<Vec<_>>();
         let status = unsafe {
             (shared_api.sim_shared_read)(channel_id, raw_slots.as_ptr(), raw_slots.len() as u32)
@@ -411,36 +427,45 @@ impl Project {
         let Some(shared_api) = &self.shared_api else {
             return Ok(Vec::new());
         };
-        let mut out = Vec::new();
-        let mut capacity = 32_u32;
-        loop {
-            let mut raw_slots = vec![SimSharedSlotRaw::default(); capacity as usize];
-            let mut written = 0_u32;
-            let status = unsafe {
-                (shared_api.sim_shared_write)(
-                    channel_id,
-                    raw_slots.as_mut_ptr(),
-                    capacity,
-                    &mut written as *mut u32,
-                )
-            };
-            if status != STATUS_OK && status != STATUS_BUFFER_TOO_SMALL {
-                self.map_status(status, None, None)?;
-                break;
-            }
-            raw_slots.truncate(
-                validate_written(written, capacity, "sim_shared_write")
-                    .map_err(SimError::FfiContract)?,
-            );
-            out.extend(raw_slots.into_iter().filter_map(SimSharedSlot::from_raw));
-            if status == STATUS_BUFFER_TOO_SMALL {
-                capacity =
-                    next_capacity(capacity, "sim_shared_write").map_err(SimError::FfiContract)?;
-                continue;
-            }
-            break;
+        let expected_slot_count = self
+            .shared_channel_by_id(channel_id)
+            .ok_or_else(|| {
+                SimError::FfiContract(format!("unknown shared channel id {channel_id}"))
+            })?
+            .slot_count;
+        let capacity = expected_slot_count.max(1);
+        let mut raw_slots = vec![SimSharedSlotRaw::default(); capacity as usize];
+        let mut written = 0_u32;
+        let status = unsafe {
+            (shared_api.sim_shared_write)(
+                channel_id,
+                raw_slots.as_mut_ptr(),
+                capacity,
+                &mut written as *mut u32,
+            )
+        };
+        if status == STATUS_BUFFER_TOO_SMALL {
+            return Err(SimError::FfiContract(format!(
+                "sim_shared_write reported BUFFER_TOO_SMALL for channel {channel_id} with declared slot_count {expected_slot_count}"
+            )));
         }
-        Ok(out)
+        if status != STATUS_OK {
+            self.map_status(status, None, None)?;
+        }
+
+        raw_slots.truncate(
+            validate_written(written, capacity, "sim_shared_write")
+                .map_err(SimError::FfiContract)?,
+        );
+        let slots = raw_slots
+            .into_iter()
+            .map(|slot| {
+                SimSharedSlot::try_from_raw(slot)
+                    .map_err(|err| SimError::FfiContract(format!("sim_shared_write: {err}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_dense_shared_snapshot(&slots, expected_slot_count as usize, "sim_shared_write")?;
+        Ok(slots)
     }
 
     pub(crate) fn read(&self, signal: &SignalMeta) -> Result<SignalValue, SimError> {
@@ -526,7 +551,7 @@ impl Project {
                 .into_iter()
                 .map(|entry| {
                     let name = decode_owned_cstr(entry.name, "CAN bus name")
-                        .map_err(|_| ProjectError::InvalidCanMetadata)?;
+                        .map_err(ProjectError::InvalidCanMetadata)?;
                     Ok(SimCanBusDesc {
                         id: entry.id,
                         name,
@@ -574,7 +599,7 @@ impl Project {
                 .into_iter()
                 .map(|entry| {
                     let name = decode_owned_cstr(entry.name, "shared channel name")
-                        .map_err(|_| ProjectError::InvalidSharedMetadata)?;
+                        .map_err(ProjectError::InvalidSharedMetadata)?;
                     Ok(SimSharedDesc {
                         id: entry.id,
                         name,
@@ -584,4 +609,28 @@ impl Project {
                 .collect();
         }
     }
+}
+
+fn validate_dense_shared_snapshot(
+    slots: &[SimSharedSlot],
+    expected_slot_count: usize,
+    context: &str,
+) -> Result<(), SimError> {
+    if slots.len() != expected_slot_count {
+        return Err(SimError::FfiContract(format!(
+            "{context} returned {} slots, expected {expected_slot_count}",
+            slots.len()
+        )));
+    }
+
+    for (expected_slot_id, slot) in slots.iter().enumerate() {
+        if slot.slot_id as usize != expected_slot_id {
+            return Err(SimError::FfiContract(format!(
+                "{context} returned slot id {} at dense index {}; expected slot id {}",
+                slot.slot_id, expected_slot_id, expected_slot_id
+            )));
+        }
+    }
+
+    Ok(())
 }

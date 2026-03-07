@@ -162,11 +162,22 @@ pub fn fillSharedChannels(out: [*]SimSharedDesc, capacity: u32, out_written: *u3
 
 pub fn sharedRead(ctx: *Ctx, channel_id: u32, slots: [*]const SimSharedSlot, count: u32) SimStatus {
     if (channel_id != 0) return .INVALID_ARG;
+    if (count != shared_channels[0].slot_count) return .INVALID_ARG;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         const slot = slots[i];
-        if (slot.slot_id == 0 and slot.value.type == .F32) {
-            ctx.runtime.input = slot.value.data.f32;
+        if (slot.slot_id != i) return .INVALID_ARG;
+        if (slot.type != slot.value.type) return .TYPE_MISMATCH;
+        switch (slot.slot_id) {
+            0 => {
+                if (slot.value.type != .F32) return .TYPE_MISMATCH;
+                ctx.runtime.input = slot.value.data.f32;
+            },
+            1 => {
+                if (slot.value.type != .F32) return .TYPE_MISMATCH;
+                _ = slot.value.data.f32;
+            },
+            else => return .INVALID_ARG,
         }
     }
     return .OK;
@@ -174,14 +185,16 @@ pub fn sharedRead(ctx: *Ctx, channel_id: u32, slots: [*]const SimSharedSlot, cou
 
 pub fn sharedWrite(ctx: *Ctx, channel_id: u32, out: [*]SimSharedSlot, capacity: u32, out_written: *u32) SimStatus {
     if (channel_id != 0) return .INVALID_ARG;
-    if (capacity < 2) {
-        out_written.* = capacity;
-        return .BUFFER_TOO_SMALL;
+    const required = shared_channels[0].slot_count;
+    const written: u32 = @min(capacity, required);
+    if (written > 0) {
+        out[0] = .{ .slot_id = 0, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.input } } };
     }
-    out[0] = .{ .slot_id = 0, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.input } } };
-    out[1] = .{ .slot_id = 1, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.output } } };
-    out_written.* = 2;
-    return .OK;
+    if (written > 1) {
+        out[1] = .{ .slot_id = 1, .type = .F32, .value = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.output } } };
+    }
+    out_written.* = written;
+    return if (written < required) .BUFFER_TOO_SMALL else .OK;
 }
 
 fn flashValue(ctx: *const Ctx) u32 {

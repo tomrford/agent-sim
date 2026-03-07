@@ -9,16 +9,16 @@ pub enum ProjectError {
     FfiContract(String),
     #[error("missing symbol: {0}")]
     MissingSymbol(&'static str),
-    #[error("invalid signal metadata from project")]
-    InvalidSignalMetadata,
+    #[error("invalid signal metadata from project: {0}")]
+    InvalidSignalMetadata(String),
     #[error("invalid CAN exports: {0}")]
     InvalidCanExports(String),
     #[error("invalid shared-state exports: {0}")]
     InvalidSharedExports(String),
-    #[error("invalid CAN metadata from project")]
-    InvalidCanMetadata,
-    #[error("invalid shared-state metadata from project")]
-    InvalidSharedMetadata,
+    #[error("invalid CAN metadata from project: {0}")]
+    InvalidCanMetadata(String),
+    #[error("invalid shared-state metadata from project: {0}")]
+    InvalidSharedMetadata(String),
     #[error("flash support error: {0}")]
     Flash(String),
 }
