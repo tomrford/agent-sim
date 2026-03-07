@@ -75,10 +75,20 @@ fn hvac_power_cycle_clears_fault_code() {
     let _ = run_agent(&["--instance", &session, "set", "hvac.power", "true"]);
     let _ = run_agent(&["--instance", &session, "set", "hvac.current_temp", "65.0"]);
     let _ = run_agent(&["--instance", &session, "time", "step", "10ms"]);
-    let fault = run_agent(&["--instance", &session, "get", "hvac.error_code"]);
+    let fault = run_agent(&[
+        "--instance",
+        &session,
+        "get",
+        "hvac.error_code",
+        "hvac.state",
+    ]);
     assert!(
         fault.contains("U32(1)"),
         "expected fault code 1, got: {fault}"
+    );
+    assert!(
+        fault.contains("U32(5)"),
+        "expected fault state before power cycle, got: {fault}"
     );
 
     let _ = run_agent(&["--instance", &session, "set", "hvac.power", "false"]);

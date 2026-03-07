@@ -108,7 +108,7 @@ impl PlatformCanSocket {
         let status = if self.fd_capable && ((frame.flags & CAN_FLAG_FD) != 0 || frame.len > 8) {
             let mut raw = TPEAKMsgFD {
                 ID: frame.arb_id,
-                MSGTYPE: encode_message_type(frame.flags),
+                MSGTYPE: encode_message_type(frame.flags)?,
                 DLC: fd_len_to_dlc(frame.len)?,
                 DATA: frame.data,
             };
@@ -116,7 +116,7 @@ impl PlatformCanSocket {
         } else {
             let mut raw = TPEAKMsg {
                 ID: frame.arb_id,
-                MSGTYPE: encode_message_type(frame.flags),
+                MSGTYPE: encode_message_type(frame.flags)?,
                 LEN: frame.len,
                 DATA: {
                     let mut payload = [0_u8; 8];
@@ -265,7 +265,7 @@ fn decode_message_type(msgtype: BYTE) -> u8 {
     flags
 }
 
-fn encode_message_type(flags: u8) -> BYTE {
+fn encode_message_type(flags: u8) -> Result<BYTE, String> {
     let mut msgtype: DWORD = PEAK_MESSAGE_STANDARD;
     if (flags & CAN_FLAG_EXTENDED) != 0 {
         msgtype |= PEAK_MESSAGE_EXTENDED;
@@ -282,7 +282,9 @@ fn encode_message_type(flags: u8) -> BYTE {
     if (flags & CAN_FLAG_ESI) != 0 {
         msgtype |= PEAK_MESSAGE_ESI;
     }
-    BYTE::try_from(msgtype).expect("PEAK message type bitfield fits in BYTE")
+    BYTE::try_from(msgtype).map_err(|_| {
+        format!("invalid PEAK message type bitfield 0x{msgtype:X} derived from flags 0x{flags:02X}")
+    })
 }
 
 fn fd_dlc_to_len(dlc: BYTE) -> Result<u8, String> {
