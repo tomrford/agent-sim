@@ -1,32 +1,37 @@
+#[path = "server/bootstrap.rs"]
+mod bootstrap;
+#[path = "server/dispatch.rs"]
+mod dispatch;
+#[path = "server/instance_worker.rs"]
+mod instance_worker;
+#[path = "server/tick.rs"]
+mod tick;
+
 use crate::can::CanSocket;
 use crate::can::dbc::{DbcBusOverlay, frame_key_from_frame};
-use crate::connection::send_request;
 use crate::daemon::lifecycle::{kill_pid, read_pid};
 use crate::envd::lifecycle::pid_path;
-use crate::envd::spec::{EnvCanBusMemberSpec, EnvInstanceSpec, EnvSharedChannelSpec, EnvSpec};
-use crate::load::write_load_spec;
+use crate::envd::spec::{EnvCanBusMemberSpec, EnvSpec};
 use crate::protocol::{
-    CanBusData, CanBusFramesData, CanFrameData, CanScheduleData, EnvAction, InstanceAction,
-    Request, RequestAction, Response, ResponseData, WorkerAction, parse_duration_us,
+    CanFrameData, InstanceAction, Request, RequestAction, Response, parse_duration_us,
 };
 use crate::sim::time::TimeEngine;
 #[cfg(test)]
 use crate::sim::types::CAN_FLAG_EXTENDED;
 use crate::sim::types::SimCanFrame;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
-use tokio::task::yield_now;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::timeout;
 
 struct EnvState {
     name: String,
     socket_path: PathBuf,
     tick_duration_us: u32,
     instances: Vec<String>,
+    instance_workers: HashMap<String, instance_worker::InstanceWorker>,
     time: TimeEngine,
     can_buses: BTreeMap<String, EnvCanBusState>,
     instance_bus_map: HashMap<(String, String), String>,
@@ -66,169 +71,9 @@ struct CanScheduleJob {
     enabled: bool,
 }
 
-impl EnvState {
-    async fn bootstrap(socket_path: PathBuf, env_spec: EnvSpec) -> Result<Self, String> {
-        let mut started_instances = Vec::new();
-        let result = Self::bootstrap_inner(socket_path, &env_spec, &mut started_instances).await;
-        if result.is_err() {
-            rollback_instances(&started_instances).await;
-        }
-        result
-    }
-
-    async fn bootstrap_inner(
-        socket_path: PathBuf,
-        env_spec: &EnvSpec,
-        started_instances: &mut Vec<String>,
-    ) -> Result<Self, String> {
-        let mut tick_duration_us = None;
-        let mut instance_can_buses: HashMap<String, Vec<CanBusData>> = HashMap::new();
-
-        for instance in &env_spec.instances {
-            bootstrap_instance_detached(instance).await?;
-            started_instances.push(instance.name.clone());
-
-            let info = send_request(
-                &instance.name,
-                &Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: RequestAction::Instance(InstanceAction::Info),
-                },
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-            let ResponseData::ProjectInfo {
-                tick_duration_us: instance_tick_us,
-                ..
-            } = info
-                .data
-                .ok_or_else(|| format!("missing info payload for instance '{}'", instance.name))?
-            else {
-                return Err(format!(
-                    "unexpected info payload while bootstrapping instance '{}'",
-                    instance.name
-                ));
-            };
-            match tick_duration_us {
-                Some(expected) if expected != instance_tick_us => {
-                    return Err(format!(
-                        "env '{}' requires matching tick durations, but instance '{}' reports {}us and another member reports {}us",
-                        env_spec.name, instance.name, instance_tick_us, expected
-                    ));
-                }
-                None => tick_duration_us = Some(instance_tick_us),
-                _ => {}
-            }
-
-            let can_buses = send_request(
-                &instance.name,
-                &Request {
-                    id: uuid::Uuid::new_v4(),
-                    action: RequestAction::Worker(WorkerAction::CanBuses),
-                },
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-            let ResponseData::CanBuses { buses } = can_buses.data.ok_or_else(|| {
-                format!(
-                    "missing CAN bus payload while bootstrapping instance '{}'",
-                    instance.name
-                )
-            })?
-            else {
-                return Err(format!(
-                    "unexpected CAN bus payload while bootstrapping instance '{}'",
-                    instance.name
-                ));
-            };
-            instance_can_buses.insert(instance.name.clone(), buses);
-        }
-
-        let mut instance_bus_map = HashMap::new();
-        let mut can_buses = BTreeMap::new();
-        for bus_spec in &env_spec.can_buses {
-            let mut fd_capable = false;
-            let mut bitrate = 0_u32;
-            let mut bitrate_data = 0_u32;
-            for member in &bus_spec.members {
-                let member_buses =
-                    instance_can_buses
-                        .get(&member.instance_name)
-                        .ok_or_else(|| {
-                            format!(
-                                "missing CAN bus registry for instance '{}'",
-                                member.instance_name
-                            )
-                        })?;
-                let meta = member_buses
-                    .iter()
-                    .find(|bus| bus.name == member.bus_name)
-                    .ok_or_else(|| {
-                        format!(
-                            "env CAN bus '{}' references missing bus '{}:{}'",
-                            bus_spec.name, member.instance_name, member.bus_name
-                        )
-                    })?;
-                fd_capable |= meta.fd_capable;
-                bitrate = bitrate.max(meta.bitrate);
-                bitrate_data = bitrate_data.max(meta.bitrate_data);
-                if instance_bus_map
-                    .insert(
-                        (member.instance_name.clone(), member.bus_name.clone()),
-                        bus_spec.name.clone(),
-                    )
-                    .is_some()
-                {
-                    return Err(format!(
-                        "instance '{}:{}' is attached to multiple env CAN buses",
-                        member.instance_name, member.bus_name
-                    ));
-                }
-            }
-
-            let socket = CanSocket::open(&bus_spec.vcan_iface, fd_capable)?;
-            let dbc = match &bus_spec.dbc_path {
-                Some(path) => Some(DbcBusOverlay::load(Path::new(path))?),
-                None => None,
-            };
-            can_buses.insert(
-                bus_spec.name.clone(),
-                EnvCanBusState {
-                    name: bus_spec.name.clone(),
-                    vcan_iface: bus_spec.vcan_iface.clone(),
-                    fd_capable,
-                    bitrate,
-                    bitrate_data,
-                    members: bus_spec.members.clone(),
-                    socket,
-                    dbc,
-                    latest_frames: HashMap::new(),
-                    pending_delivery: Vec::new(),
-                    schedules: BTreeMap::new(),
-                },
-            );
-        }
-
-        for shared in &env_spec.shared_channels {
-            attach_shared_channel(&env_spec.name, shared).await?;
-        }
-
-        Ok(Self {
-            name: env_spec.name.clone(),
-            socket_path,
-            tick_duration_us: tick_duration_us.unwrap_or(1),
-            instances: env_spec
-                .instances
-                .iter()
-                .map(|instance| instance.name.clone())
-                .collect(),
-            time: TimeEngine::default(),
-            can_buses,
-            instance_bus_map,
-            ignored_instance_buses: HashSet::new(),
-            shutdown: false,
-        })
-    }
+struct ActionMessage {
+    request: Request,
+    response_tx: oneshot::Sender<Response>,
 }
 
 pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(), std::io::Error> {
@@ -245,547 +90,155 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
     let listener = match UnixListener::bind(&socket_path) {
         Ok(listener) => listener,
         Err(err) => {
-            cleanup_listener_runtime(&state.instances, &state.socket_path, &state.name).await;
+            cleanup_listener_runtime(&state).await;
             return Err(err);
         }
     };
     if let Err(err) = std::fs::write(pid_path(&state.name), std::process::id().to_string()) {
-        cleanup_listener_runtime(&state.instances, &state.socket_path, &state.name).await;
+        cleanup_listener_runtime(&state).await;
         return Err(err);
     }
 
-    let state = Arc::new(Mutex::new(state));
-    let tick_state = Arc::clone(&state);
-    let tick_task = tokio::spawn(async move {
-        run_tick_loop(tick_state).await;
-    });
+    let (action_tx, action_rx) = mpsc::channel::<ActionMessage>(256);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let actor_task = tokio::spawn(run_actor_task(state, action_rx, shutdown_tx));
 
-    let result = loop {
-        {
-            let state = state.lock().await;
-            if state.shutdown {
-                break Ok(());
+    let mut listener_error = None;
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                match changed {
+                    Ok(()) if *shutdown_rx.borrow() => break,
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
+            }
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        let action_tx = action_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = handle_connection(stream, action_tx).await;
+                        });
+                    }
+                    Err(err) => {
+                        listener_error = Some(err);
+                        break;
+                    }
+                }
             }
         }
-        match timeout(Duration::from_millis(100), listener.accept()).await {
-            Ok(Ok((stream, _))) => {
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    let _ = handle_connection(stream, state).await;
-                });
-            }
-            Ok(Err(err)) => {
-                break Err(err);
-            }
-            Err(_) => {}
-        }
-    };
-
-    tick_task.abort();
-    let (instances, socket_path, env_name) = {
-        let state = state.lock().await;
-        (
-            state.instances.clone(),
-            state.socket_path.clone(),
-            state.name.clone(),
-        )
-    };
-    cleanup_listener_runtime(&instances, &socket_path, &env_name).await;
-    result
-}
-
-async fn handle_connection(
-    mut stream: UnixStream,
-    state: Arc<Mutex<EnvState>>,
-) -> Result<(), std::io::Error> {
-    let mut line = String::new();
-    let mut reader = BufReader::new(&mut stream);
-    let read = reader.read_line(&mut line).await?;
-    if read == 0 {
-        return Ok(());
     }
-    let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => dispatch_request(request, state).await,
-        Err(err) => Response::err(uuid::Uuid::new_v4(), format!("invalid request json: {err}")),
-    };
-    drop(reader);
-    let mut payload = serde_json::to_string(&response).unwrap_or_else(|err| {
-        format!("{{\"success\":false,\"error\":\"response serialization failed: {err}\"}}")
-    });
-    payload.push('\n');
-    stream.write_all(payload.as_bytes()).await?;
+
+    drop(action_tx);
+    let state = actor_task
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    cleanup_listener_runtime(&state).await;
+    if let Some(err) = listener_error {
+        return Err(err);
+    }
     Ok(())
 }
 
-async fn dispatch_request(request: Request, state: Arc<Mutex<EnvState>>) -> Response {
+async fn handle_connection(
+    stream: UnixStream,
+    action_tx: mpsc::Sender<ActionMessage>,
+) -> Result<(), std::io::Error> {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        let response = match serde_json::from_str::<Request>(line.trim_end()) {
+            Ok(request) => {
+                let request_id = request.id;
+                let (response_tx, response_rx) = oneshot::channel();
+                if action_tx
+                    .send(ActionMessage {
+                        request,
+                        response_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    Response::err(request_id, "env daemon unavailable")
+                } else {
+                    match response_rx.await {
+                        Ok(response) => response,
+                        Err(_) => Response::err(request_id, "env daemon unavailable"),
+                    }
+                }
+            }
+            Err(err) => Response::err(uuid::Uuid::new_v4(), format!("invalid request json: {err}")),
+        };
+        let mut payload = serde_json::to_string(&response).unwrap_or_else(|err| {
+            format!("{{\"success\":false,\"error\":\"response serialization failed: {err}\"}}")
+        });
+        payload.push('\n');
+        write_half.write_all(payload.as_bytes()).await?;
+    }
+}
+
+async fn process_action_message(message: ActionMessage, state: &mut EnvState) {
+    let response = handle_action(message.request, state).await;
+    let _ = message.response_tx.send(response);
+}
+
+async fn handle_action(request: Request, state: &mut EnvState) -> Response {
     let id = request.id;
     let result = match request.action {
-        RequestAction::Env(EnvAction::TimeStep { env, duration }) => {
-            dispatch_env_time_step(state, env, duration).await
-        }
-        RequestAction::Env(action) => {
-            let mut state = state.lock().await;
-            dispatch_action(action, &mut state).await
-        }
+        RequestAction::Env(action) => dispatch::dispatch_action(action, state).await,
         RequestAction::Instance(_) | RequestAction::Worker(_) => {
             Err("instance-owned action sent to env daemon".to_string())
         }
     };
+
     match result {
         Ok(data) => Response::ok(id, data),
         Err(err) => Response::err(id, err),
     }
 }
 
-async fn dispatch_env_time_step(
-    state: Arc<Mutex<EnvState>>,
-    env: String,
-    duration: String,
-) -> Result<ResponseData, String> {
-    let step = {
-        let mut state = state.lock().await;
-        ensure_env_name(&state, &env)?;
-        let duration_us = parse_duration_us(&duration).map_err(|err| err.to_string())?;
-        let tick_duration_us = state.tick_duration_us;
-        state
-            .time
-            .step_ticks(tick_duration_us, duration_us)
-            .map_err(|err| err.to_string())?
-    };
-    advance_due_ticks(Arc::clone(&state), step.advanced_ticks).await?;
-    Ok(ResponseData::TimeAdvanced {
-        requested_us: step.requested_us,
-        advanced_ticks: step.advanced_ticks,
-        advanced_us: step.advanced_us,
-    })
-}
-
-async fn run_tick_loop(state: Arc<Mutex<EnvState>>) {
+async fn run_actor_task(
+    mut state: EnvState,
+    mut action_rx: mpsc::Receiver<ActionMessage>,
+    shutdown_tx: watch::Sender<bool>,
+) -> EnvState {
     loop {
-        let (tick_duration_us, due_ticks) = {
-            let mut state = state.lock().await;
-            if state.shutdown {
-                return;
-            }
-            let tick_duration_us = state.tick_duration_us;
-            let due_ticks = state.time.tick_realtime_due(tick_duration_us);
-            (tick_duration_us, due_ticks)
-        };
-        if let Err(err) = advance_due_ticks(Arc::clone(&state), due_ticks).await {
-            let mut state = state.lock().await;
-            if !state.shutdown {
-                tracing::error!("env '{}' tick loop failed: {err}", state.name);
-                state.shutdown = true;
-            }
-            return;
+        while let Ok(message) = action_rx.try_recv() {
+            process_action_message(message, &mut state).await;
         }
-        let sleep_duration = {
-            let state = state.lock().await;
-            if state.shutdown {
-                return;
-            }
-            state.time.realtime_poll_delay(tick_duration_us)
-        };
-        sleep(sleep_duration).await;
-    }
-}
 
-async fn advance_due_ticks(state: Arc<Mutex<EnvState>>, due_ticks: u64) -> Result<(), String> {
-    for _ in 0..due_ticks {
-        {
-            let mut state = state.lock().await;
-            if state.shutdown {
-                return Ok(());
-            }
-            advance_single_tick(&mut state).await?;
+        if state.shutdown {
+            break;
         }
-        yield_now().await;
-    }
-    Ok(())
-}
 
-async fn dispatch_action(action: EnvAction, state: &mut EnvState) -> Result<ResponseData, String> {
-    match action {
-        EnvAction::Status { env } => {
-            ensure_env_name(state, &env)?;
-            Ok(ResponseData::EnvStatus {
-                env,
-                running: true,
-                instance_count: state.instances.len(),
-                tick_duration_us: state.tick_duration_us,
-            })
-        }
-        EnvAction::Reset { env } => {
-            ensure_env_name(state, &env)?;
-            for instance in &state.instances {
-                send_action_success(instance, InstanceAction::Reset).await?;
-            }
-            reset_env_can_state(state);
-            state.time.reset();
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::TimeStart { env } => {
-            ensure_env_name(state, &env)?;
-            state.time.start().map_err(|err| err.to_string())?;
-            env_time_status(state)
-        }
-        EnvAction::TimePause { env } => {
-            ensure_env_name(state, &env)?;
-            state.time.pause().map_err(|err| err.to_string())?;
-            env_time_status(state)
-        }
-        EnvAction::TimeSpeed { env, multiplier } => {
-            ensure_env_name(state, &env)?;
-            if let Some(multiplier) = multiplier {
-                state
-                    .time
-                    .set_speed(multiplier)
-                    .map_err(|err| err.to_string())?;
-            }
-            Ok(ResponseData::Speed {
-                speed: state.time.speed(),
-            })
-        }
-        EnvAction::TimeStatus { env } => {
-            ensure_env_name(state, &env)?;
-            env_time_status(state)
-        }
-        EnvAction::CanBuses { env } => {
-            ensure_env_name(state, &env)?;
-            let buses = state
-                .can_buses
-                .values()
-                .enumerate()
-                .map(|(idx, bus)| CanBusData {
-                    id: u32::try_from(idx).unwrap_or(u32::MAX),
-                    name: bus.name.clone(),
-                    bitrate: bus.bitrate,
-                    bitrate_data: bus.bitrate_data,
-                    fd_capable: bus.fd_capable,
-                    attached_iface: Some(bus.vcan_iface.clone()),
-                })
-                .collect::<Vec<_>>();
-            Ok(ResponseData::CanBuses { buses })
-        }
-        EnvAction::CanLoadDbc {
-            env,
-            bus_name,
-            path,
-        } => {
-            ensure_env_name(state, &env)?;
-            let bus = state
-                .can_buses
-                .get_mut(&bus_name)
-                .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-            let overlay = DbcBusOverlay::load(Path::new(&path))?;
-            let signal_count = overlay.signal_names().count();
-            bus.dbc = Some(overlay);
-            Ok(ResponseData::DbcLoaded {
-                bus: bus_name,
-                signal_count,
-            })
-        }
-        EnvAction::CanSend {
-            env,
-            bus_name,
-            arb_id,
-            data_hex,
-            flags,
-        } => {
-            ensure_env_name(state, &env)?;
-            let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
-            queue_env_frame(state, &bus_name, None, &frame)?;
-            Ok(ResponseData::CanSend {
-                bus: bus_name,
-                arb_id,
-                len: frame.len,
-            })
-        }
-        EnvAction::CanInspect { env, bus_name } => {
-            ensure_env_name(state, &env)?;
-            let bus = state
-                .can_buses
-                .get(&bus_name)
-                .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-            let mut frames = bus.latest_frames.values().cloned().collect::<Vec<_>>();
-            frames.sort_by(|lhs, rhs| lhs.arb_id.cmp(&rhs.arb_id));
-            Ok(ResponseData::CanInspect {
-                bus: bus_name,
-                frames: frames.iter().map(frame_data).collect(),
-            })
-        }
-        EnvAction::CanScheduleAdd {
-            env,
-            bus_name,
-            job_id,
-            arb_id,
-            data_hex,
-            every,
-            flags,
-        } => {
-            ensure_env_name(state, &env)?;
-            let every_ticks = duration_to_env_ticks(state.tick_duration_us, &every)?;
-            let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
-            let job_id = job_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let next_due_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
-            let schedule = CanScheduleJob {
-                job_id: job_id.clone(),
-                arb_id,
-                flags: frame.flags,
-                data_hex,
-                frame,
-                every_ticks,
-                next_due_tick,
-                enabled: true,
-            };
-            ensure_unique_schedule_job_id(
-                state.can_buses.values().map(|bus| &bus.schedules),
-                &job_id,
-            )?;
-            let bus = state
-                .can_buses
-                .get_mut(&bus_name)
-                .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-            bus.schedules.insert(job_id, schedule);
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::CanScheduleUpdate {
-            env,
-            job_id,
-            arb_id,
-            data_hex,
-            every,
-            flags,
-        } => {
-            ensure_env_name(state, &env)?;
-            let every_ticks = duration_to_env_ticks(state.tick_duration_us, &every)?;
-            let current_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
-            let bus_name = locate_schedule_bus(state, &job_id)?;
-            let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
-            let (_, schedule) = locate_schedule_mut(state, &job_id)?;
-            update_schedule(schedule, arb_id, data_hex, frame, every_ticks, current_tick);
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::CanScheduleRemove { env, job_id } => {
-            ensure_env_name(state, &env)?;
-            let (bus_name, _) = locate_schedule_mut(state, &job_id)?;
-            let bus = state
-                .can_buses
-                .get_mut(&bus_name)
-                .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
-            bus.schedules.remove(&job_id);
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::CanScheduleStop { env, job_id } => {
-            ensure_env_name(state, &env)?;
-            let (_, schedule) = locate_schedule_mut(state, &job_id)?;
-            schedule.enabled = false;
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::CanScheduleStart { env, job_id } => {
-            ensure_env_name(state, &env)?;
-            let (_, schedule) = locate_schedule_mut(state, &job_id)?;
-            start_schedule(schedule);
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::CanScheduleList { env, bus_name } => {
-            ensure_env_name(state, &env)?;
-            let schedules = state
-                .can_buses
-                .iter()
-                .filter(|(name, _)| bus_name.as_ref().is_none_or(|requested| requested == *name))
-                .flat_map(|(name, bus)| {
-                    bus.schedules.values().map(|schedule| CanScheduleData {
-                        job_id: schedule.job_id.clone(),
-                        bus: name.clone(),
-                        arb_id: schedule.arb_id,
-                        data_hex: schedule.data_hex.clone(),
-                        flags: schedule.flags,
-                        every_ticks: schedule.every_ticks,
-                        next_due_tick: schedule.next_due_tick,
-                        enabled: schedule.enabled,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(ResponseData::CanSchedules { schedules })
-        }
-        EnvAction::Close { env } => {
-            ensure_env_name(state, &env)?;
+        let due_ticks = state.time.tick_realtime_due(state.tick_duration_us);
+        if let Err(err) = tick::advance_due_ticks(&mut state, due_ticks).await {
+            tracing::error!("env '{}' tick loop failed: {err}", state.name);
             state.shutdown = true;
-            Ok(ResponseData::Ack)
-        }
-        EnvAction::TimeStep { .. } => {
-            unreachable!("env time-step is handled before state-lock dispatch")
-        }
-    }
-}
-
-async fn advance_single_tick(state: &mut EnvState) -> Result<(), String> {
-    let mut instance_rx: HashMap<String, HashMap<String, Vec<SimCanFrame>>> = HashMap::new();
-    let current_tick = state.time.status(state.tick_duration_us).elapsed_ticks;
-
-    for bus in state.can_buses.values_mut() {
-        let mut ready_frames = std::mem::take(&mut bus.pending_delivery);
-        for frame in bus.socket.recv_all()? {
-            ready_frames.push(PendingFrame {
-                source_instance: None,
-                frame,
-            });
-        }
-        for schedule in bus.schedules.values_mut() {
-            if !schedule.enabled || schedule.next_due_tick > current_tick {
-                continue;
-            }
-            bus.socket.send(&schedule.frame)?;
-            bus.latest_frames.insert(
-                frame_key_from_frame(&schedule.frame),
-                schedule.frame.clone(),
-            );
-            ready_frames.push(PendingFrame {
-                source_instance: None,
-                frame: schedule.frame.clone(),
-            });
-            schedule.next_due_tick = current_tick.saturating_add(schedule.every_ticks.max(1));
         }
 
-        for pending in ready_frames {
-            bus.latest_frames
-                .insert(frame_key_from_frame(&pending.frame), pending.frame.clone());
-            for member in &bus.members {
-                if pending
-                    .source_instance
-                    .as_ref()
-                    .is_some_and(|source| source == &member.instance_name)
-                {
-                    continue;
-                }
-                instance_rx
-                    .entry(member.instance_name.clone())
-                    .or_default()
-                    .entry(member.bus_name.clone())
-                    .or_default()
-                    .push(pending.frame.clone());
-            }
+        if state.shutdown {
+            break;
+        }
+
+        let sleep_duration = state.time.realtime_poll_delay(state.tick_duration_us);
+        match timeout(sleep_duration, action_rx.recv()).await {
+            Ok(Some(message)) => process_action_message(message, &mut state).await,
+            Ok(None) => break,
+            Err(_) => {}
         }
     }
 
-    let instances = state.instances.clone();
-    for instance in instances {
-        let can_rx = instance_rx
-            .remove(&instance)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(bus_name, frames)| CanBusFramesData {
-                bus_name,
-                frames: frames.iter().map(Into::into).collect(),
-            })
-            .collect::<Vec<_>>();
-        let response = send_request(
-            &instance,
-            &Request {
-                id: uuid::Uuid::new_v4(),
-                action: RequestAction::Worker(WorkerAction::Step { can_rx }),
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        let ResponseData::WorkerStep { can_tx } = response
-            .data
-            .ok_or_else(|| format!("missing worker-step payload for instance '{instance}'"))?
-        else {
-            return Err(format!(
-                "unexpected worker-step payload while stepping instance '{instance}'"
-            ));
-        };
-        for batch in can_tx {
-            let Some(env_bus_name) =
-                resolve_env_bus_name(state, instance.as_str(), batch.bus_name.as_str())
-            else {
-                continue;
-            };
-            for frame in batch
-                .frames
-                .into_iter()
-                .map(SimCanFrame::try_from)
-                .collect::<Result<Vec<_>, _>>()?
-            {
-                queue_env_frame(state, &env_bus_name, Some(instance.clone()), &frame)?;
-            }
-        }
-    }
-
-    state.time.advance_ticks(1);
-    Ok(())
-}
-
-fn resolve_env_bus_name(state: &mut EnvState, instance: &str, bus_name: &str) -> Option<String> {
-    let key = (instance.to_string(), bus_name.to_string());
-    if let Some(env_bus_name) = state.instance_bus_map.get(&key) {
-        return Some(env_bus_name.clone());
-    }
-
-    if state.ignored_instance_buses.insert(key) {
-        tracing::warn!(
-            "instance '{}:{}' emitted CAN traffic on an unmapped bus; dropping frames",
-            instance,
-            bus_name
-        );
-    }
-    None
-}
-
-async fn attach_shared_channel(
-    env_name: &str,
-    shared: &EnvSharedChannelSpec,
-) -> Result<(), String> {
-    let shared_root = crate::daemon::lifecycle::session_root().join("shared");
-    std::fs::create_dir_all(&shared_root).map_err(|err| {
-        format!(
-            "failed to create shared region root '{}': {err}",
-            shared_root.display()
-        )
-    })?;
-    let region_path = shared_root.join(format!("{env_name}__{}.bin", shared.name));
-    let region_path_str = region_path.display().to_string();
-
-    if !shared
-        .members
-        .iter()
-        .any(|member| member.instance_name == shared.writer_instance)
-    {
-        return Err(format!(
-            "shared channel '{}' writer '{}' is not listed in members",
-            shared.name, shared.writer_instance
-        ));
-    }
-
-    let mut members = shared.members.iter().collect::<Vec<_>>();
-    members.sort_by_key(|member| member.instance_name != shared.writer_instance);
-
-    for member in members {
-        send_action_success(
-            &member.instance_name,
-            InstanceAction::SharedAttach {
-                channel_name: member.channel_name.clone(),
-                path: region_path_str.clone(),
-                writer: member.instance_name == shared.writer_instance,
-                writer_session: shared.writer_instance.clone(),
-            },
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-fn ensure_env_name(state: &EnvState, requested: &str) -> Result<(), String> {
-    if state.name == requested {
-        Ok(())
-    } else {
-        Err(format!(
-            "env daemon '{}' cannot service requests for env '{}'",
-            state.name, requested
-        ))
-    }
+    let _ = shutdown_tx.send(true);
+    state
 }
 
 fn duration_to_env_ticks(tick_duration_us: u32, raw: &str) -> Result<u64, String> {
@@ -878,12 +331,12 @@ fn locate_schedule_bus(state: &EnvState, job_id: &str) -> Result<String, String>
         .ok_or_else(|| format!("CAN schedule '{job_id}' not found"))
 }
 
-async fn cleanup_listener_runtime(instances: &[String], socket_path: &Path, env_name: &str) {
-    shutdown_instances(instances).await;
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
+async fn cleanup_listener_runtime(state: &EnvState) {
+    shutdown_instances(state).await;
+    if state.socket_path.exists() {
+        let _ = std::fs::remove_file(&state.socket_path);
     }
-    let pid = pid_path(env_name);
+    let pid = pid_path(&state.name);
     if pid.exists() {
         let _ = std::fs::remove_file(pid);
     }
@@ -916,35 +369,6 @@ fn frame_data(frame: &SimCanFrame) -> CanFrameData {
     }
 }
 
-fn env_time_status(state: &EnvState) -> Result<ResponseData, String> {
-    let status = state.time.status(state.tick_duration_us);
-    Ok(ResponseData::TimeStatus {
-        state: status.state,
-        elapsed_ticks: status.elapsed_ticks,
-        elapsed_time_us: status.elapsed_time_us,
-        speed: status.speed,
-    })
-}
-
-async fn send_action_success(instance: &str, action: InstanceAction) -> Result<(), String> {
-    let response = send_request(
-        instance,
-        &Request {
-            id: uuid::Uuid::new_v4(),
-            action: RequestAction::Instance(action),
-        },
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    if response.success {
-        Ok(())
-    } else {
-        Err(response
-            .error
-            .unwrap_or_else(|| "command failed".to_string()))
-    }
-}
-
 fn update_schedule(
     schedule: &mut CanScheduleJob,
     arb_id: u32,
@@ -965,67 +389,23 @@ fn start_schedule(schedule: &mut CanScheduleJob) {
     schedule.enabled = true;
 }
 
-async fn run_bootstrap_instance_command(
-    exe: &Path,
-    instance_name: &str,
-    spec_path: &Path,
-) -> Result<std::process::Output, String> {
-    tokio::process::Command::new(exe)
-        .arg("__internal")
-        .arg("bootstrap-instance")
-        .arg("--instance")
-        .arg(instance_name)
-        .arg("--load-spec-path")
-        .arg(spec_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|err| format!("failed to bootstrap instance '{instance_name}': {err}"))
-}
-
-async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-    bootstrap_instance_detached_with_exe(instance, &exe).await
-}
-
-async fn bootstrap_instance_detached_with_exe(
-    instance: &EnvInstanceSpec,
-    exe: &Path,
-) -> Result<(), String> {
-    std::fs::create_dir_all(crate::daemon::lifecycle::bootstrap_dir())
-        .map_err(|err| format!("failed to create bootstrap dir: {err}"))?;
-    let spec_path = crate::daemon::lifecycle::bootstrap_dir().join(format!(
-        "{}-helper-{}.json",
-        instance.name,
-        uuid::Uuid::new_v4()
-    ));
-    write_load_spec(&spec_path, &instance.load_spec).map_err(|err| err.to_string())?;
-
-    let output = run_bootstrap_instance_command(exe, &instance.name, &spec_path).await;
-    let _ = std::fs::remove_file(&spec_path);
-    let output = output?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to bootstrap instance '{}': {}",
-            instance.name,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+async fn shutdown_instances(state: &EnvState) {
+    let mut pending = Vec::with_capacity(state.instances.len());
+    for instance in &state.instances {
+        if let Some(worker) = state.instance_workers.get(instance)
+            && let Ok(response_rx) = worker.begin_instance_request(InstanceAction::Close).await
+        {
+            pending.push((instance.clone(), response_rx));
+            continue;
+        }
+        if let Some(pid) = read_pid(instance) {
+            let _ = kill_pid(pid);
+        }
     }
-}
 
-async fn rollback_instances(started_instances: &[String]) {
-    shutdown_instances(started_instances).await;
-}
-
-async fn shutdown_instances(instances: &[String]) {
-    for instance in instances {
-        if send_action_success(instance, InstanceAction::Close)
-            .await
-            .is_err()
-            && let Some(pid) = read_pid(instance)
+    for (instance, response_rx) in pending {
+        if response_rx.await.ok().and_then(Result::ok).is_none()
+            && let Some(pid) = read_pid(&instance)
         {
             let _ = kill_pid(pid);
         }
@@ -1035,8 +415,9 @@ async fn shutdown_instances(instances: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envd::spec::EnvInstanceSpec;
     use crate::load::LoadSpec;
-    use crate::protocol::CanFrameWireData;
+    use crate::protocol::{CanBusFramesData, CanFrameWireData, ResponseData, WorkerAction};
     use serial_test::serial;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1163,43 +544,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn advance_due_ticks_releases_lock_between_ticks() {
-        let state = Arc::new(Mutex::new(EnvState {
-            name: "env".to_string(),
-            socket_path: PathBuf::new(),
-            tick_duration_us: 20,
-            instances: Vec::new(),
-            time: TimeEngine::default(),
-            can_buses: BTreeMap::new(),
-            instance_bus_map: HashMap::new(),
-            ignored_instance_buses: HashSet::new(),
-            shutdown: false,
-        }));
-        let tick_state = Arc::clone(&state);
-        let tick_task = tokio::spawn(async move {
-            advance_due_ticks(tick_state, 1_024)
-                .await
-                .expect("due ticks should advance");
-        });
-
-        yield_now().await;
-
-        let mut state_guard = timeout(Duration::from_millis(100), state.lock())
-            .await
-            .expect("state lock should be acquirable during catch-up");
-        state_guard.shutdown = true;
-        drop(state_guard);
-
-        tick_task.await.expect("tick task should join");
-
-        let tick_count = state.lock().await.time.status(20).elapsed_ticks;
-        assert!(
-            tick_count < 1_024,
-            "expected shutdown to interrupt catch-up after lock interleaving, got {tick_count}"
-        );
-    }
-
     #[test]
     fn resolve_env_bus_name_skips_unmapped_bus_once() {
         let mut state = EnvState {
@@ -1207,6 +551,7 @@ mod tests {
             socket_path: PathBuf::new(),
             tick_duration_us: 20,
             instances: vec!["instance-a".to_string()],
+            instance_workers: HashMap::new(),
             time: TimeEngine::default(),
             can_buses: BTreeMap::new(),
             instance_bus_map: HashMap::from([(
@@ -1217,12 +562,12 @@ mod tests {
             shutdown: false,
         };
 
-        let mapped = resolve_env_bus_name(&mut state, "instance-a", "external");
+        let mapped = tick::resolve_env_bus_name(&mut state, "instance-a", "external");
         assert_eq!(mapped.as_deref(), Some("env-external"));
         assert!(state.ignored_instance_buses.is_empty());
 
-        let first_unmapped = resolve_env_bus_name(&mut state, "instance-a", "internal");
-        let second_unmapped = resolve_env_bus_name(&mut state, "instance-a", "internal");
+        let first_unmapped = tick::resolve_env_bus_name(&mut state, "instance-a", "internal");
+        let second_unmapped = tick::resolve_env_bus_name(&mut state, "instance-a", "internal");
         assert!(first_unmapped.is_none());
         assert!(second_unmapped.is_none());
         assert_eq!(state.ignored_instance_buses.len(), 1);
@@ -1253,10 +598,6 @@ mod tests {
         let listener =
             UnixListener::bind(&socket_path).expect("fake instance listener should bind");
         let server = tokio::spawn(async move {
-            let (_probe_stream, _) = listener
-                .accept()
-                .await
-                .expect("fake instance should accept readiness probe");
             let (mut stream, _) = listener
                 .accept()
                 .await
@@ -1295,12 +636,16 @@ mod tests {
                 .await
                 .expect("response should be writable");
         });
+        let worker = instance_worker::InstanceWorker::connect(instance)
+            .await
+            .expect("test worker should connect to fake instance");
 
         let mut state = EnvState {
             name: "env".to_string(),
             socket_path: PathBuf::new(),
             tick_duration_us: 20,
             instances: vec![instance.to_string()],
+            instance_workers: HashMap::from([(instance.to_string(), worker)]),
             time: TimeEngine::default(),
             can_buses: BTreeMap::new(),
             instance_bus_map: HashMap::new(),
@@ -1308,7 +653,7 @@ mod tests {
             shutdown: false,
         };
 
-        advance_single_tick(&mut state)
+        tick::advance_single_tick(&mut state)
             .await
             .expect("unmapped instance buses should be ignored");
         server.await.expect("fake instance task should finish");
@@ -1342,7 +687,7 @@ mod tests {
             },
         };
         let missing_exe = home.path().join("missing-bootstrap-binary");
-        let err = bootstrap_instance_detached_with_exe(&instance, &missing_exe)
+        let err = bootstrap::bootstrap_instance_detached_with_exe(&instance, &missing_exe)
             .await
             .expect_err("missing bootstrap binary should fail");
         assert!(
