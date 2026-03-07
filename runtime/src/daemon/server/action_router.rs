@@ -180,7 +180,12 @@ pub(super) async fn dispatch_instance_action(
                 return Err(format!("CAN bus '{bus_name}' is already attached"));
             }
             let meta = can_ops::find_can_bus_meta(state, &bus_name)?;
-            let socket = CanSocket::open(&vcan_iface, meta.fd_capable)?;
+            let socket = CanSocket::open(
+                &vcan_iface,
+                meta.bitrate,
+                meta.bitrate_data,
+                meta.fd_capable,
+            )?;
             state
                 .can_attached
                 .insert(bus_name.clone(), super::AttachedCanBus { meta, socket });

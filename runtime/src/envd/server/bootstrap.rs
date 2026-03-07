@@ -144,7 +144,7 @@ impl EnvState {
                 }
             }
 
-            let socket = CanSocket::open(&bus_spec.vcan_iface, fd_capable)?;
+            let socket = CanSocket::open(&bus_spec.vcan_iface, bitrate, bitrate_data, fd_capable)?;
             let dbc = match &bus_spec.dbc_path {
                 Some(path) => Some(DbcBusOverlay::load(Path::new(path))?),
                 None => None,
