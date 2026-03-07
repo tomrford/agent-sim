@@ -95,6 +95,7 @@ pub fn tick(ctx: *Ctx) void {
         ctx.compressor = false;
         ctx.heater = false;
         ctx.fan = false;
+        ctx.error_code = 0;
         ctx.uptime = 0;
         ctx.comp_off_timer = 0;
         ctx.fan_timer = 0;
@@ -211,6 +212,7 @@ pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
         },
         .mode => {
             if (in.type != .U32) return .TYPE_MISMATCH;
+            if (in.data.u32 > @intFromEnum(Mode.cool_only)) return .INVALID_ARG;
             ctx.mode = in.data.u32;
         },
         .ambient_temp => {

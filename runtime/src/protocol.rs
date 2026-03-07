@@ -94,9 +94,7 @@ pub enum InstanceAction {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WorkerAction {
     CanBuses,
-    Step {
-        can_rx: Vec<CanBusFramesData>,
-    },
+    Step { can_rx: Vec<CanBusFramesData> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

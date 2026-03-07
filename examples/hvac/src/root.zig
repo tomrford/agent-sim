@@ -14,6 +14,14 @@ fn requireInitialized() ?*adapter.Ctx {
     return &g_ctx;
 }
 
+pub export fn sim_get_api_version(out_major: ?*u32, out_minor: ?*u32) SimStatus {
+    const major = out_major orelse return .INVALID_ARG;
+    const minor = out_minor orelse return .INVALID_ARG;
+    major.* = 2;
+    minor.* = 0;
+    return .OK;
+}
+
 pub export fn sim_init() SimStatus {
     g_ctx = .{};
     const status = adapter.init(&g_ctx);
@@ -118,4 +126,36 @@ test "fault on over-temperature" {
 
     try std.testing.expect(sim_read_val(9, &out) == .OK);
     try std.testing.expectEqual(@as(u32, 1), out.data.u32); // over-temp code
+}
+
+test "power cycle clears fault code" {
+    try std.testing.expect(sim_init() == .OK);
+
+    var v = SimValue{ .type = .BOOL, .data = .{ .b = true } };
+    try std.testing.expect(sim_write_val(0, &v) == .OK);
+
+    v = SimValue{ .type = .F32, .data = .{ .f32 = 65.0 } };
+    try std.testing.expect(sim_write_val(4, &v) == .OK);
+    try std.testing.expect(sim_tick() == .OK);
+
+    v = SimValue{ .type = .BOOL, .data = .{ .b = false } };
+    try std.testing.expect(sim_write_val(0, &v) == .OK);
+    try std.testing.expect(sim_tick() == .OK);
+
+    var out: SimValue = undefined;
+    try std.testing.expect(sim_read_val(5, &out) == .OK);
+    try std.testing.expectEqual(@as(u32, 0), out.data.u32); // OFF
+    try std.testing.expect(sim_read_val(9, &out) == .OK);
+    try std.testing.expectEqual(@as(u32, 0), out.data.u32); // cleared fault code
+}
+
+test "invalid mode writes are rejected" {
+    try std.testing.expect(sim_init() == .OK);
+
+    const invalid_mode = SimValue{ .type = .U32, .data = .{ .u32 = 99 } };
+    try std.testing.expect(sim_write_val(2, &invalid_mode) == .INVALID_ARG);
+
+    var out: SimValue = undefined;
+    try std.testing.expect(sim_read_val(2, &out) == .OK);
+    try std.testing.expectEqual(@as(u32, 0), out.data.u32);
 }

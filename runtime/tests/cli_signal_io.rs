@@ -52,6 +52,49 @@ fn hvac_writable_and_read_only_signal_behavior() {
         "expected read-only write rejection, got: {err}"
     );
 
+    let invalid_mode = run_agent_fail(&["--instance", &session, "set", "hvac.mode", "99"]);
+    assert!(
+        invalid_mode.contains("invalid argument"),
+        "expected invalid mode rejection, got: {invalid_mode}"
+    );
+
+    let _ = run_agent(&["--instance", &session, "close"]);
+}
+
+#[test]
+fn hvac_power_cycle_clears_fault_code() {
+    ensure_fixtures_built();
+    let session = unique_session("signal-io-hvac-fault");
+    let libpath = hvac_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("hvac path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "set", "hvac.power", "true"]);
+    let _ = run_agent(&["--instance", &session, "set", "hvac.current_temp", "65.0"]);
+    let _ = run_agent(&["--instance", &session, "time", "step", "10ms"]);
+    let fault = run_agent(&["--instance", &session, "get", "hvac.error_code"]);
+    assert!(
+        fault.contains("U32(1)"),
+        "expected fault code 1, got: {fault}"
+    );
+
+    let _ = run_agent(&["--instance", &session, "set", "hvac.power", "false"]);
+    let _ = run_agent(&["--instance", &session, "time", "step", "10ms"]);
+    let cleared = run_agent(&[
+        "--instance",
+        &session,
+        "get",
+        "hvac.error_code",
+        "hvac.state",
+    ]);
+    assert!(
+        cleared.contains("U32(0)"),
+        "expected cleared outputs, got: {cleared}"
+    );
+
     let _ = run_agent(&["--instance", &session, "close"]);
 }
 

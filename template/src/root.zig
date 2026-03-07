@@ -18,6 +18,14 @@ fn requireInitialized() ?*adapter.Ctx {
     return &g_ctx;
 }
 
+pub export fn sim_get_api_version(out_major: ?*u32, out_minor: ?*u32) SimStatus {
+    const major = out_major orelse return .INVALID_ARG;
+    const minor = out_minor orelse return .INVALID_ARG;
+    major.* = 2;
+    minor.* = 0;
+    return .OK;
+}
+
 pub export fn sim_init() SimStatus {
     const status = adapter.init(&g_ctx);
     if (status == .OK) g_initialized = true;
@@ -134,6 +142,12 @@ pub export fn sim_shared_write(channel_id: u32, out: ?[*]SimSharedSlot, capacity
 }
 
 test "template sanity" {
+    var major: u32 = 0;
+    var minor: u32 = 0;
+    try std.testing.expect(sim_get_api_version(&major, &minor) == .OK);
+    try std.testing.expectEqual(@as(u32, 2), major);
+    try std.testing.expectEqual(@as(u32, 0), minor);
+
     try std.testing.expect(sim_init() == .OK);
 
     const in = SimValue{ .type = .F32, .data = .{ .f32 = 5.0 } };
