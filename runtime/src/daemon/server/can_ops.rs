@@ -61,34 +61,6 @@ pub(super) fn record_frame(state: &mut DaemonState, bus_name: &str, frame: &SimC
     bus_frames.insert(frame_key_from_frame(frame), frame.clone());
 }
 
-pub(super) fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
-    let compact = raw
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && *ch != '_')
-        .collect::<String>();
-    if compact.len() % 2 != 0 {
-        return Err(format!(
-            "invalid CAN payload hex '{raw}': expected an even number of hex characters"
-        ));
-    }
-    if compact.len() / 2 > 64 {
-        return Err(format!(
-            "invalid CAN payload hex '{raw}': payload exceeds 64 bytes"
-        ));
-    }
-    let mut payload = Vec::with_capacity(compact.len() / 2);
-    let bytes = compact.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        let pair = format!("{}{}", bytes[idx] as char, bytes[idx + 1] as char);
-        let value = u8::from_str_radix(&pair, 16)
-            .map_err(|_| format!("invalid CAN payload hex '{raw}': bad byte '{pair}'"))?;
-        payload.push(value);
-        idx += 2;
-    }
-    Ok(payload)
-}
-
 #[cfg(test)]
 pub(super) fn ensure_absolute_path(path: &str, context: &str) -> Result<(), String> {
     if std::path::Path::new(path).is_absolute() {

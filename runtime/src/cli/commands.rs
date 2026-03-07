@@ -234,16 +234,8 @@ mod tests {
             .to_string();
         let expected = std::fs::canonicalize(dbc.path()).expect("temp dbc should canonicalize");
         let args = CliArgs {
-            daemon: false,
-            bootstrap_instance: false,
-            env_daemon: false,
             json: false,
             instance: "default".to_string(),
-            libpath: None,
-            load_spec_path: None,
-            env_tag: None,
-            env_name: None,
-            env_spec_path: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -262,16 +254,8 @@ mod tests {
     #[test]
     fn can_load_dbc_request_rejects_missing_path() {
         let args = CliArgs {
-            daemon: false,
-            bootstrap_instance: false,
-            env_daemon: false,
             json: false,
             instance: "default".to_string(),
-            libpath: None,
-            load_spec_path: None,
-            env_tag: None,
-            env_name: None,
-            env_spec_path: None,
             config: None,
             command: Some(Command::Can(CanArgs {
                 command: CanCommand::LoadDbc {
@@ -293,16 +277,8 @@ mod tests {
     #[test]
     fn load_request_is_handled_by_cli_executor() {
         let args = CliArgs {
-            daemon: false,
-            bootstrap_instance: false,
-            env_daemon: false,
             json: false,
             instance: "default".to_string(),
-            libpath: None,
-            load_spec_path: None,
-            env_tag: Some("bench".to_string()),
-            env_name: None,
-            env_spec_path: None,
             config: None,
             command: Some(Command::Load(LoadArgs {
                 libpath: Some("/tmp/libsim.dylib".to_string()),

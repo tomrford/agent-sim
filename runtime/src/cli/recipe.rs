@@ -86,13 +86,13 @@ async fn validate_recipe_preconditions(
     recipe: &crate::config::recipe::RecipeDef,
     default_instance: &str,
 ) -> Result<(), CliError> {
-    let sessions = lifecycle::list_sessions()
+    let instances = lifecycle::list_instances()
         .await
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
-    let running = sessions
+    let running = instances
         .iter()
-        .filter(|(_, _, is_running, _)| *is_running)
-        .map(|(name, _, _, env)| (name.clone(), env.clone()))
+        .filter(|instance| instance.running)
+        .map(|instance| (instance.name.clone(), instance.env.clone()))
         .collect::<Vec<_>>();
 
     let default_instance_env = running
@@ -484,13 +484,13 @@ fn resolve_instance(default_instance: &str, instance: &Option<String>) -> String
 }
 
 async fn attached_env_name(instance: &str) -> Result<Option<String>, CliError> {
-    let running = lifecycle::list_sessions()
+    let running = lifecycle::list_instances()
         .await
         .map_err(|err| CliError::CommandFailed(err.to_string()))?;
     Ok(running
         .into_iter()
-        .find(|(name, _, is_running, _)| name == instance && *is_running)
-        .and_then(|(_, _, _, env)| env))
+        .find(|running_instance| running_instance.name == instance && running_instance.running)
+        .and_then(|running_instance| running_instance.env))
 }
 
 async fn send_env_action_success(env: &str, action: Action) -> Result<(), CliError> {

@@ -1,4 +1,5 @@
-const sim_types = @import("sim_types.zig");
+const std = @import("std");
+const sim_types = @import("shared_sim_types");
 
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;
@@ -21,6 +22,33 @@ const temp_lo_limit: f32 = -40.0;
 
 const State = enum(u32) { off = 0, idle = 1, heating = 2, cooling = 3, fan_drain = 4, fault = 5 };
 const Mode = enum(u32) { auto = 0, heat_only = 1, cool_only = 2 };
+const Signal = enum(u32) {
+    power = 0,
+    target_temp = 1,
+    mode = 2,
+    ambient_temp = 3,
+    current_temp = 4,
+    state = 5,
+    compressor = 6,
+    heater = 7,
+    fan = 8,
+    error_code = 9,
+    uptime = 10,
+};
+
+const signal_catalog = [_]Signal{
+    .power,
+    .target_temp,
+    .mode,
+    .ambient_temp,
+    .current_temp,
+    .state,
+    .compressor,
+    .heater,
+    .fan,
+    .error_code,
+    .uptime,
+};
 
 // -- Context ------------------------------------------------------------------
 
@@ -49,20 +77,6 @@ pub const Ctx = struct {
 //
 //  IDs 0-4  : writable inputs
 //  IDs 5-10 : read-only outputs
-
-const signals = [_]SimSignalDesc{
-    .{ .id = 0, .name = "hvac.power", .type = .BOOL, .units = null },
-    .{ .id = 1, .name = "hvac.target_temp", .type = .F32, .units = "degC" },
-    .{ .id = 2, .name = "hvac.mode", .type = .U32, .units = null },
-    .{ .id = 3, .name = "hvac.ambient_temp", .type = .F32, .units = "degC" },
-    .{ .id = 4, .name = "hvac.current_temp", .type = .F32, .units = "degC" },
-    .{ .id = 5, .name = "hvac.state", .type = .U32, .units = null },
-    .{ .id = 6, .name = "hvac.compressor", .type = .BOOL, .units = null },
-    .{ .id = 7, .name = "hvac.heater", .type = .BOOL, .units = null },
-    .{ .id = 8, .name = "hvac.fan", .type = .BOOL, .units = null },
-    .{ .id = 9, .name = "hvac.error_code", .type = .U32, .units = null },
-    .{ .id = 10, .name = "hvac.uptime", .type = .U32, .units = "ticks" },
-};
 
 // -- Public API ---------------------------------------------------------------
 
@@ -153,54 +167,57 @@ pub fn tick(ctx: *Ctx) void {
 }
 
 pub fn signalCount() u32 {
-    return signals.len;
+    return signal_catalog.len;
 }
 
 pub fn fillSignals(out: [*]SimSignalDesc, capacity: u32, out_written: *u32) SimStatus {
-    const n: u32 = @min(capacity, signals.len);
+    const n: u32 = @min(capacity, signal_catalog.len);
     var i: u32 = 0;
-    while (i < n) : (i += 1) out[i] = signals[i];
+    while (i < n) : (i += 1) {
+        out[i] = signalDesc(signal_catalog[i]);
+    }
     out_written.* = n;
-    return if (capacity < signals.len) .BUFFER_TOO_SMALL else .OK;
+    return if (capacity < signal_catalog.len) .BUFFER_TOO_SMALL else .OK;
 }
 
 pub fn read(ctx: *Ctx, id: u32, out: *SimValue) SimStatus {
-    switch (id) {
-        0 => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.power } },
-        1 => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.target_temp } },
-        2 => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.mode } },
-        3 => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.ambient_temp } },
-        4 => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.current_temp } },
-        5 => out.* = .{ .type = .U32, .data = .{ .u32 = @intFromEnum(ctx.state) } },
-        6 => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.compressor } },
-        7 => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.heater } },
-        8 => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.fan } },
-        9 => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.error_code } },
-        10 => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.uptime } },
-        else => return .INVALID_SIGNAL,
+    const signal = std.meta.intToEnum(Signal, id) catch return .INVALID_SIGNAL;
+    switch (signal) {
+        .power => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.power } },
+        .target_temp => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.target_temp } },
+        .mode => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.mode } },
+        .ambient_temp => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.ambient_temp } },
+        .current_temp => out.* = .{ .type = .F32, .data = .{ .f32 = ctx.current_temp } },
+        .state => out.* = .{ .type = .U32, .data = .{ .u32 = @intFromEnum(ctx.state) } },
+        .compressor => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.compressor } },
+        .heater => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.heater } },
+        .fan => out.* = .{ .type = .BOOL, .data = .{ .b = ctx.fan } },
+        .error_code => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.error_code } },
+        .uptime => out.* = .{ .type = .U32, .data = .{ .u32 = ctx.uptime } },
     }
     return .OK;
 }
 
 pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
-    switch (id) {
-        0 => {
+    const signal = std.meta.intToEnum(Signal, id) catch return .INVALID_SIGNAL;
+    switch (signal) {
+        .power => {
             if (in.type != .BOOL) return .TYPE_MISMATCH;
             ctx.power = in.data.b;
         },
-        1 => {
+        .target_temp => {
             if (in.type != .F32) return .TYPE_MISMATCH;
             ctx.target_temp = in.data.f32;
         },
-        2 => {
+        .mode => {
             if (in.type != .U32) return .TYPE_MISMATCH;
             ctx.mode = in.data.u32;
         },
-        3 => {
+        .ambient_temp => {
             if (in.type != .F32) return .TYPE_MISMATCH;
             ctx.ambient_temp = in.data.f32;
         },
-        4 => {
+        .current_temp => {
             if (in.type != .F32) return .TYPE_MISMATCH;
             ctx.current_temp = in.data.f32;
         },
@@ -220,4 +237,20 @@ fn driftToward(ctx: *Ctx) void {
     } else {
         ctx.current_temp = ctx.ambient_temp;
     }
+}
+
+fn signalDesc(signal: Signal) SimSignalDesc {
+    return switch (signal) {
+        .power => .{ .id = @intFromEnum(signal), .name = "hvac.power", .type = .BOOL, .units = null },
+        .target_temp => .{ .id = @intFromEnum(signal), .name = "hvac.target_temp", .type = .F32, .units = "degC" },
+        .mode => .{ .id = @intFromEnum(signal), .name = "hvac.mode", .type = .U32, .units = null },
+        .ambient_temp => .{ .id = @intFromEnum(signal), .name = "hvac.ambient_temp", .type = .F32, .units = "degC" },
+        .current_temp => .{ .id = @intFromEnum(signal), .name = "hvac.current_temp", .type = .F32, .units = "degC" },
+        .state => .{ .id = @intFromEnum(signal), .name = "hvac.state", .type = .U32, .units = null },
+        .compressor => .{ .id = @intFromEnum(signal), .name = "hvac.compressor", .type = .BOOL, .units = null },
+        .heater => .{ .id = @intFromEnum(signal), .name = "hvac.heater", .type = .BOOL, .units = null },
+        .fan => .{ .id = @intFromEnum(signal), .name = "hvac.fan", .type = .BOOL, .units = null },
+        .error_code => .{ .id = @intFromEnum(signal), .name = "hvac.error_code", .type = .U32, .units = null },
+        .uptime => .{ .id = @intFromEnum(signal), .name = "hvac.uptime", .type = .U32, .units = "ticks" },
+    };
 }

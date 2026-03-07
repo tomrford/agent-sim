@@ -118,15 +118,14 @@ impl EnvRegistry {
 
     fn spawn_env_daemon(
         self,
-        env: &str,
+        _env: &str,
         bootstrap_path: &Path,
     ) -> Result<std::process::Child, EnvDaemonError> {
         let exe = std::env::current_exe()?;
         let mut command = std::process::Command::new(exe);
         command
-            .arg("--env-daemon")
-            .arg("--env-name")
-            .arg(env)
+            .arg("__internal")
+            .arg("env-daemon")
             .arg("--env-spec-path")
             .arg(bootstrap_path)
             .stdout(Stdio::null())

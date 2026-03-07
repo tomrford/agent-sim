@@ -5,6 +5,7 @@ pub mod connection;
 pub mod daemon;
 pub mod envd;
 pub mod error;
+pub mod internal_cli;
 pub mod load;
 pub mod protocol;
 pub mod shared;

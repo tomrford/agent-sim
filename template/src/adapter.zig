@@ -1,5 +1,5 @@
 const std = @import("std");
-const sim_types = @import("sim_types.zig");
+const sim_types = @import("shared_sim_types");
 
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;
@@ -28,10 +28,16 @@ pub const Ctx = struct {
     runtime: VolatileState = .{},
 };
 
-const signals = [_]SimSignalDesc{
-    .{ .id = 0, .name = "demo.input", .type = .F32, .units = null },
-    .{ .id = 1, .name = "demo.output", .type = .F32, .units = null },
-    .{ .id = 2, .name = "demo.flash_value", .type = .U32, .units = null },
+const Signal = enum(u32) {
+    input = 0,
+    output = 1,
+    flash_value = 2,
+};
+
+const signal_catalog = [_]Signal{
+    .input,
+    .output,
+    .flash_value,
 };
 
 pub const can_buses = [_]SimCanBusDesc{
@@ -75,37 +81,40 @@ pub fn tick(ctx: *Ctx) void {
 }
 
 pub fn signalCount() u32 {
-    return signals.len;
+    return signal_catalog.len;
 }
 
 pub fn fillSignals(out: [*]SimSignalDesc, capacity: u32, out_written: *u32) SimStatus {
-    const n: u32 = @min(capacity, signals.len);
+    const n: u32 = @min(capacity, signal_catalog.len);
     var i: u32 = 0;
-    while (i < n) : (i += 1) out[i] = signals[i];
+    while (i < n) : (i += 1) {
+        out[i] = signalDesc(signal_catalog[i]);
+    }
     out_written.* = n;
-    return if (capacity < signals.len) .BUFFER_TOO_SMALL else .OK;
+    return if (capacity < signal_catalog.len) .BUFFER_TOO_SMALL else .OK;
 }
 
 pub fn read(ctx: *Ctx, id: u32, out: *SimValue) SimStatus {
-    switch (id) {
-        0 => {
+    const signal = std.meta.intToEnum(Signal, id) catch return .INVALID_SIGNAL;
+    switch (signal) {
+        .input => {
             out.* = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.input } };
             return .OK;
         },
-        1 => {
+        .output => {
             out.* = .{ .type = .F32, .data = .{ .f32 = ctx.runtime.output } };
             return .OK;
         },
-        2 => {
+        .flash_value => {
             out.* = .{ .type = .U32, .data = .{ .u32 = flashValue(ctx) } };
             return .OK;
         },
-        else => return .INVALID_SIGNAL,
     }
 }
 
 pub fn write(ctx: *Ctx, id: u32, in: *const SimValue) SimStatus {
-    if (id != 0) return .INVALID_SIGNAL;
+    const signal = std.meta.intToEnum(Signal, id) catch return .INVALID_SIGNAL;
+    if (signal != .input) return .INVALID_SIGNAL;
     if (in.type != .F32) return .TYPE_MISMATCH;
     ctx.runtime.input = in.data.f32;
     return .OK;
@@ -199,4 +208,12 @@ pub fn sharedWrite(ctx: *Ctx, channel_id: u32, out: [*]SimSharedSlot, capacity: 
 
 fn flashValue(ctx: *const Ctx) u32 {
     return std.mem.readInt(u32, ctx.non_volatile.flash[0..4], .little);
+}
+
+fn signalDesc(signal: Signal) SimSignalDesc {
+    return switch (signal) {
+        .input => .{ .id = @intFromEnum(signal), .name = "demo.input", .type = .F32, .units = null },
+        .output => .{ .id = @intFromEnum(signal), .name = "demo.output", .type = .F32, .units = null },
+        .flash_value => .{ .id = @intFromEnum(signal), .name = "demo.flash_value", .type = .U32, .units = null },
+    };
 }

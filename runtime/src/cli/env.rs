@@ -187,17 +187,16 @@ fn validate_env_can_ifaces(env_def: &EnvDef) -> Result<(), CliError> {
 }
 
 async fn ensure_sessions_available(env_def: &EnvDef) -> Result<(), CliError> {
-    let sessions = lifecycle::list_sessions()
+    let instances = lifecycle::list_instances()
         .await
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
-    for session in &env_def.instances {
-        if sessions
-            .iter()
-            .any(|(name, _, running, _)| name == &session.name && *running)
-        {
+    for instance in &env_def.instances {
+        if instances.iter().any(|running_instance| {
+            running_instance.name == instance.name && running_instance.running
+        }) {
             return Err(CliError::CommandFailed(format!(
                 "instance '{}' is already running",
-                session.name
+                instance.name
             )));
         }
     }

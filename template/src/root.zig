@@ -1,6 +1,6 @@
 const std = @import("std");
 const adapter = @import("adapter.zig");
-const sim_types = @import("sim_types.zig");
+const sim_types = @import("shared_sim_types");
 
 pub const SimStatus = sim_types.SimStatus;
 pub const SimValue = sim_types.SimValue;

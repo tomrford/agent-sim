@@ -337,7 +337,7 @@ pub(super) async fn dispatch_action(
                 .can_attached
                 .get(&bus_name)
                 .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
-            let payload = can_ops::parse_data_hex(&data_hex)?;
+            let payload = crate::can::parse_data_hex(&data_hex)?;
             let mut data = [0_u8; 64];
             data[..payload.len()].copy_from_slice(&payload);
             let frame = crate::sim::types::SimCanFrame {
@@ -362,15 +362,15 @@ pub(super) async fn dispatch_action(
             env: state.env.clone(),
         }),
         Action::InstanceList => {
-            let instances = crate::daemon::lifecycle::list_sessions()
+            let instances = crate::daemon::lifecycle::list_instances()
                 .await
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|(name, socket_path, running, env)| InstanceInfoData {
-                    name,
-                    socket_path: socket_path.display().to_string(),
-                    running,
-                    env,
+                .map(|instance| InstanceInfoData {
+                    name: instance.name,
+                    socket_path: instance.socket_path.display().to_string(),
+                    running: instance.running,
+                    env: instance.env,
                 })
                 .collect::<Vec<_>>();
             Ok(ResponseData::InstanceList { instances })
