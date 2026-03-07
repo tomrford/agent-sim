@@ -2,7 +2,7 @@ use crate::cli::args::{
     CanCommand, CliArgs, Command, InstanceCommand, SetArgs, SharedCommand, TimeCommand,
 };
 use crate::cli::error::CliError;
-use crate::protocol::{Action, Request};
+use crate::protocol::{InstanceAction, Request, RequestAction};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -10,24 +10,24 @@ use uuid::Uuid;
 pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     let command = args.command.as_ref().ok_or(CliError::MissingCommand)?;
     let action = match command {
-        Command::Info => Action::Info,
-        Command::Signals => Action::Signals,
+        Command::Info => InstanceAction::Info,
+        Command::Signals => InstanceAction::Signals,
         Command::Shared(shared) => match &shared.command {
-            SharedCommand::List => Action::SharedList,
-            SharedCommand::Get { channel } => Action::SharedGet {
+            SharedCommand::List => InstanceAction::SharedList,
+            SharedCommand::Get { channel } => InstanceAction::SharedGet {
                 channel_name: parse_shared_channel_selector(channel)?,
             },
         },
         Command::Can(can) => match &can.command {
-            CanCommand::Buses => Action::CanBuses,
-            CanCommand::Attach { bus, vcan_iface } => Action::CanAttach {
+            CanCommand::Buses => InstanceAction::CanBuses,
+            CanCommand::Attach { bus, vcan_iface } => InstanceAction::CanAttach {
                 bus_name: bus.clone(),
                 vcan_iface: vcan_iface.clone(),
             },
-            CanCommand::Detach { bus } => Action::CanDetach {
+            CanCommand::Detach { bus } => InstanceAction::CanDetach {
                 bus_name: bus.clone(),
             },
-            CanCommand::LoadDbc { bus, path } => Action::CanLoadDbc {
+            CanCommand::LoadDbc { bus, path } => InstanceAction::CanLoadDbc {
                 bus_name: bus.clone(),
                 path: canonicalize_cli_path(path)?,
             },
@@ -36,35 +36,35 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
                 arb_id,
                 data_hex,
                 flags,
-            } => Action::CanSend {
+            } => InstanceAction::CanSend {
                 bus_name: bus.clone(),
                 arb_id: parse_arb_id(arb_id)?,
                 data_hex: data_hex.clone(),
                 flags: *flags,
             },
         },
-        Command::Reset => Action::Reset,
-        Command::Get(get) => Action::Get {
+        Command::Reset => InstanceAction::Reset,
+        Command::Get(get) => InstanceAction::Get {
             selectors: get.selectors.clone(),
         },
-        Command::Set(set) => Action::Set {
+        Command::Set(set) => InstanceAction::Set {
             writes: parse_set_entries(set)?,
         },
-        Command::Close(close) if !close.all && close.env.is_none() => Action::Close,
+        Command::Close(close) if !close.all && close.env.is_none() => InstanceAction::Close,
         Command::Instance(instance) => match instance.command {
-            Some(InstanceCommand::List) => Action::InstanceList,
-            None => Action::InstanceStatus,
+            Some(InstanceCommand::List) => InstanceAction::InstanceList,
+            None => InstanceAction::InstanceStatus,
         },
         Command::Time(time) => match &time.command {
-            TimeCommand::Start => Action::TimeStart,
-            TimeCommand::Pause => Action::TimePause,
-            TimeCommand::Step { duration } => Action::TimeStep {
+            TimeCommand::Start => InstanceAction::TimeStart,
+            TimeCommand::Pause => InstanceAction::TimePause,
+            TimeCommand::Step { duration } => InstanceAction::TimeStep {
                 duration: duration.clone(),
             },
-            TimeCommand::Speed { multiplier } => Action::TimeSpeed {
+            TimeCommand::Speed { multiplier } => InstanceAction::TimeSpeed {
                 multiplier: *multiplier,
             },
-            TimeCommand::Status => Action::TimeStatus,
+            TimeCommand::Status => InstanceAction::TimeStatus,
         },
         Command::Load(_)
         | Command::Watch(_)
@@ -78,7 +78,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
     };
     Ok(Request {
         id: Uuid::new_v4(),
-        action,
+        action: RequestAction::Instance(action),
     })
 }
 
@@ -245,7 +245,7 @@ mod tests {
             })),
         };
         let request = to_request(&args).expect("can load-dbc request should build");
-        let Action::CanLoadDbc { path, .. } = request.action else {
+        let RequestAction::Instance(InstanceAction::CanLoadDbc { path, .. }) = request.action else {
             panic!("expected can load-dbc action");
         };
         assert_eq!(Path::new(&path), expected.as_path());

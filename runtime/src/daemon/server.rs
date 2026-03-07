@@ -9,7 +9,7 @@ mod tick_ops;
 
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, RequestAction, Response};
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
 use crate::sim::project::Project;
@@ -217,49 +217,52 @@ pub async fn run_listener(
 }
 
 async fn handle_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     action_tx: mpsc::Sender<ActionMessage>,
 ) -> Result<(), std::io::Error> {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
     let mut line = String::new();
-    let mut reader = BufReader::new(&mut stream);
-    let read = reader.read_line(&mut line).await?;
-    if read == 0 {
-        return Ok(());
-    }
-    let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => {
-            let request_id = request.id;
-            let (response_tx, response_rx) = oneshot::channel();
-            if action_tx
-                .send(ActionMessage {
-                    request,
-                    response_tx,
-                })
-                .await
-                .is_err()
-            {
-                Response::err(request_id, "daemon unavailable")
-            } else {
-                match response_rx.await {
-                    Ok(response) => response,
-                    Err(_) => Response::err(request_id, "daemon unavailable"),
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        let response = match serde_json::from_str::<Request>(line.trim_end()) {
+            Ok(request) => {
+                let request_id = request.id;
+                let (response_tx, response_rx) = oneshot::channel();
+                if action_tx
+                    .send(ActionMessage {
+                        request,
+                        response_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    Response::err(request_id, "daemon unavailable")
+                } else {
+                    match response_rx.await {
+                        Ok(response) => response,
+                        Err(_) => Response::err(request_id, "daemon unavailable"),
+                    }
                 }
             }
-        }
-        Err(e) => Response {
-            id: uuid::Uuid::new_v4(),
-            success: false,
-            data: None,
-            error: Some(format!("invalid request json: {e}")),
-        },
-    };
-    drop(reader);
-    let mut payload = serde_json::to_string(&response).unwrap_or_else(|e| {
-        format!("{{\"success\":false,\"error\":\"response serialization failed: {e}\"}}")
-    });
-    payload.push('\n');
-    stream.write_all(payload.as_bytes()).await?;
-    Ok(())
+            Err(e) => Response {
+                id: uuid::Uuid::new_v4(),
+                success: false,
+                data: None,
+                error: Some(format!("invalid request json: {e}")),
+            },
+        };
+        let mut payload = serde_json::to_string(&response).unwrap_or_else(|e| {
+            format!("{{\"success\":false,\"error\":\"response serialization failed: {e}\"}}")
+        });
+        payload.push('\n');
+        write_half.write_all(payload.as_bytes()).await?;
+    }
 }
 
 async fn process_action_message(message: ActionMessage, state: &mut DaemonState) {
@@ -269,7 +272,11 @@ async fn process_action_message(message: ActionMessage, state: &mut DaemonState)
 
 async fn handle_action(request: Request, state: &mut DaemonState) -> Response {
     let id = request.id;
-    let result = action_router::dispatch_action(request.action, state).await;
+    let result = match request.action {
+        RequestAction::Instance(action) => action_router::dispatch_instance_action(action, state).await,
+        RequestAction::Worker(action) => action_router::dispatch_worker_action(action, state).await,
+        RequestAction::Env(_) => Err("env-owned action sent to instance daemon".to_string()),
+    };
 
     match result {
         Ok(data) => Response::ok(id, data),
