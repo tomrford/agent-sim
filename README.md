@@ -98,7 +98,10 @@ See `examples/hvac/agent-sim.toml` for device/env/recipe examples.
 
 ## Creating a DLL
 
-Use the `template/` scaffold. Edit `src/adapter.zig` (logic + signals) and `project.zig` (name + includes). See `docs/template-guide.md`.
+Use the `template/` scaffold. Edit `src/adapter.zig` (logic + signals) and `project.zig` (name + includes).
+
+- Human-oriented authoring guide: `docs/template-guide.md`
+- Agent-oriented build/test guide: `docs/agent-guide.md`
 
 ## Project Structure
 
@@ -107,7 +110,7 @@ runtime/         Rust CLI + daemon (Cargo)
 template/        Zig shared-library template
 examples/hvac/   HVAC thermostat example DLL
 include/         sim_api.h — shared C ABI contract
-docs/            template guide
+docs/            guides for DLL authors and agents
 ```
 
 ## Toolchain

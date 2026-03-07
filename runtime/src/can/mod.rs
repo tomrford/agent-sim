@@ -271,6 +271,34 @@ impl CanSocket {
     }
 }
 
+pub fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
+    let compact = raw
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_')
+        .collect::<String>();
+    if compact.len() % 2 != 0 {
+        return Err(format!(
+            "invalid CAN payload hex '{raw}': expected an even number of hex characters"
+        ));
+    }
+    if compact.len() / 2 > 64 {
+        return Err(format!(
+            "invalid CAN payload hex '{raw}': payload exceeds 64 bytes"
+        ));
+    }
+    let mut payload = Vec::with_capacity(compact.len() / 2);
+    let bytes = compact.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let pair = format!("{}{}", bytes[idx] as char, bytes[idx + 1] as char);
+        let value = u8::from_str_radix(&pair, 16)
+            .map_err(|_| format!("invalid CAN payload hex '{raw}': bad byte '{pair}'"))?;
+        payload.push(value);
+        idx += 2;
+    }
+    Ok(payload)
+}
+
 pub fn validate_frame(bus_name: &str, fd_capable: bool, frame: &SimCanFrame) -> Result<(), String> {
     if (frame.flags & CAN_FLAG_RESERVED_MASK) != 0 {
         return Err(format!(

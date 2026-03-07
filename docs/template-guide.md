@@ -23,6 +23,12 @@ Key rules:
 - Serialize calls into a loaded DLL (not thread-safe).
 - Signal IDs/types are discovered at runtime — never hardcode across builds.
 - Use `sim_get_tick_duration_us` for the tick quantum; don't assume a fixed value.
+- Shared-state channels are dense snapshots:
+  - `slot_count` is the full snapshot size
+  - valid slot ids are exactly `0 .. slot_count-1`
+  - `SimSharedSlot.type` must match `SimSharedSlot.value.type`
+  - `sim_shared_read` receives exactly `slot_count` slots in ascending slot order
+  - `sim_shared_write` must return exactly `slot_count` slots in ascending slot order
 
 ## Optional Flash Export
 
@@ -79,7 +85,7 @@ demonstrate snapshot-style sharing between instances.
 | File                | Why                                           |
 | ------------------- | --------------------------------------------- |
 | `src/root.zig`      | ABI exports, argument/status plumbing         |
-| `src/sim_types.zig` | Zig mirror of `sim_api.h` types               |
+| `include/sim_types.zig` | Shared Zig mirror of `sim_api.h` types |
 | `build.zig`         | Generic build; reads `project.zig` for config |
 
 ## Tick Duration

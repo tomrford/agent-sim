@@ -67,7 +67,7 @@ async fn run_load_command(
         config_base_dir,
         load.libpath.as_deref(),
         &load.flash,
-        args.env_tag.clone(),
+        None,
     )
     .map_err(|err| CliError::CommandFailed(err.to_string()))?;
 
@@ -140,13 +140,13 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
         }
     }
 
-    let sessions = lifecycle::list_sessions()
+    let instances = lifecycle::list_instances()
         .await
         .map_err(|e| CliError::CommandFailed(e.to_string()))?;
-    let mut targets = sessions
+    let mut targets = instances
         .into_iter()
-        .filter(|(_, _, running, _)| *running)
-        .map(|(name, _, _, _)| name)
+        .filter(|instance| instance.running)
+        .map(|instance| instance.name)
         .collect::<Vec<_>>();
     targets.sort();
 
@@ -184,11 +184,11 @@ async fn close_env_and_wait(env_name: &str) -> Result<(), CliError> {
     let env_socket = env_lifecycle::socket_path(env_name);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let running_instances = lifecycle::list_sessions()
+        let running_instances = lifecycle::list_instances()
             .await
             .map_err(|err| CliError::CommandFailed(err.to_string()))?
             .into_iter()
-            .any(|(_, _, running, env)| running && env.as_deref() == Some(env_name));
+            .any(|instance| instance.running && instance.env.as_deref() == Some(env_name));
         if !env_socket.exists() && !running_instances {
             return Ok(());
         }
