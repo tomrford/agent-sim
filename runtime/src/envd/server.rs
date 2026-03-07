@@ -752,7 +752,10 @@ async fn attach_shared_channel(
         ));
     }
 
-    for member in &shared.members {
+    let mut members = shared.members.iter().collect::<Vec<_>>();
+    members.sort_by_key(|member| member.instance_name != shared.writer_instance);
+
+    for member in members {
         send_action_success(
             &member.instance_name,
             Action::SharedAttach {

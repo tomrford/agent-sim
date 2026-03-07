@@ -12,6 +12,7 @@ const MAX_SNAPSHOT_SPINS: usize = 32;
 struct SharedHeader {
     generation: u64,
     slot_count: u32,
+    initialized: u32,
     writer_session: [u8; WRITER_NAME_LEN],
 }
 
@@ -23,6 +24,8 @@ pub struct SharedRegion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SharedSnapshotError {
     Busy { attempts: usize },
+    Uninitialized,
+    Invalid(String),
 }
 
 impl std::fmt::Display for SharedSnapshotError {
@@ -34,6 +37,8 @@ impl std::fmt::Display for SharedSnapshotError {
                     "shared snapshot remained unstable after {attempts} read attempts"
                 )
             }
+            Self::Uninitialized => write!(f, "shared snapshot has not been published yet"),
+            Self::Invalid(message) => write!(f, "{message}"),
         }
     }
 }
@@ -57,8 +62,14 @@ impl SharedRegion {
         }
 
         let expected_len = Self::byte_len(slot_count);
+        if !initialize && !path.exists() {
+            return Err(format!(
+                "shared region '{}' has not been initialized by its writer yet",
+                path.display()
+            ));
+        }
         let file = OpenOptions::new()
-            .create(true)
+            .create(initialize)
             .truncate(false)
             .read(true)
             .write(true)
@@ -70,6 +81,12 @@ impl SharedRegion {
             .len() as usize;
         let mut should_initialize = initialize;
         if current_len == 0 {
+            if !initialize {
+                return Err(format!(
+                    "shared region '{}' has not been initialized by its writer yet",
+                    path.display()
+                ));
+            }
             file.set_len(expected_len as u64).map_err(|e| {
                 format!(
                     "failed to size shared region '{}' to {} bytes: {e}",
@@ -95,6 +112,7 @@ impl SharedRegion {
             let header = SharedHeader {
                 generation: 0,
                 slot_count: slot_count as u32,
+                initialized: 0,
                 writer_session: encode_writer(writer_session),
             };
             Self::write_header(&mut mmap, &header);
@@ -115,19 +133,18 @@ impl SharedRegion {
     }
 
     pub fn publish(&mut self, slots: &[SimSharedSlot]) -> Result<(), String> {
-        if slots.len() > self.slot_count {
+        if slots.len() != self.slot_count {
             return Err(format!(
                 "attempted to publish {} slots into region with capacity {}",
                 slots.len(),
                 self.slot_count
             ));
         }
-        let slot_capacity = self.slot_count;
-        for slot in slots {
-            if slot.slot_id as usize >= slot_capacity {
+        for (expected_slot_id, slot) in slots.iter().enumerate() {
+            if slot.slot_id as usize != expected_slot_id {
                 return Err(format!(
-                    "shared slot id {} exceeds channel capacity {}",
-                    slot.slot_id, slot_capacity
+                    "shared slot id {} appeared at dense index {}; expected slot id {}",
+                    slot.slot_id, expected_slot_id, expected_slot_id
                 ));
             }
         }
@@ -135,13 +152,11 @@ impl SharedRegion {
         self.set_generation(generation.wrapping_add(1)); // odd = write in progress
         {
             let slot_storage = self.slot_storage_mut();
-            for slot in slot_storage.iter_mut() {
-                *slot = SimSharedSlotRaw::default();
-            }
-            for slot in slots {
-                slot_storage[slot.slot_id as usize] = slot.to_raw();
+            for (idx, slot) in slots.iter().enumerate() {
+                slot_storage[idx] = slot.to_raw();
             }
         }
+        self.set_initialized(true);
         self.set_generation(generation.wrapping_add(2)); // even = stable snapshot
         self.mmap
             .flush_async()
@@ -156,11 +171,28 @@ impl SharedRegion {
                 std::hint::spin_loop();
                 continue;
             }
+            if !self.is_initialized() {
+                return Err(SharedSnapshotError::Uninitialized);
+            }
             let snapshot = self
                 .slot_storage()
                 .iter()
-                .filter_map(|slot| SimSharedSlot::from_raw(*slot))
-                .collect::<Vec<_>>();
+                .enumerate()
+                .map(|(expected_slot_id, slot)| {
+                    let decoded = SimSharedSlot::try_from_raw(*slot).map_err(|err| {
+                        SharedSnapshotError::Invalid(format!(
+                            "shared snapshot slot {expected_slot_id} is invalid: {err}"
+                        ))
+                    })?;
+                    if decoded.slot_id as usize != expected_slot_id {
+                        return Err(SharedSnapshotError::Invalid(format!(
+                            "shared snapshot slot {expected_slot_id} reported slot id {}",
+                            decoded.slot_id
+                        )));
+                    }
+                    Ok(decoded)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let after = self.generation();
             if before == after && after.is_multiple_of(2) {
                 return Ok(snapshot);
@@ -206,6 +238,18 @@ impl SharedRegion {
         let generation_ptr = unsafe { std::ptr::addr_of_mut!((*header).generation) };
         let generation = unsafe { AtomicU64::from_ptr(generation_ptr) };
         generation.store(value, Ordering::Release);
+    }
+
+    fn is_initialized(&self) -> bool {
+        let header = Self::read_header(&self.mmap);
+        header.initialized != 0
+    }
+
+    fn set_initialized(&mut self, initialized: bool) {
+        let header = self.mmap.as_mut_ptr().cast::<SharedHeader>();
+        unsafe {
+            (*header).initialized = u32::from(initialized);
+        }
     }
 
     fn slot_storage(&self) -> &[SimSharedSlotRaw] {
@@ -275,17 +319,29 @@ mod tests {
         let mut region = SharedRegion::open(&path, 2, "writer", true)
             .expect("shared region should open for writer");
         region
-            .publish(&[SimSharedSlot {
-                slot_id: 0,
-                value: SignalValue::F32(7.0),
-            }])
+            .publish(&[
+                SimSharedSlot {
+                    slot_id: 0,
+                    value: SignalValue::F32(7.0),
+                },
+                SimSharedSlot {
+                    slot_id: 1,
+                    value: SignalValue::Bool(false),
+                },
+            ])
             .expect("initial publish should succeed");
         let before = region.generation();
 
-        let err = region.publish(&[SimSharedSlot {
-            slot_id: 9,
-            value: SignalValue::Bool(true),
-        }]);
+        let err = region.publish(&[
+            SimSharedSlot {
+                slot_id: 0,
+                value: SignalValue::F32(7.0),
+            },
+            SimSharedSlot {
+                slot_id: 9,
+                value: SignalValue::Bool(true),
+            },
+        ]);
         assert!(err.is_err(), "publish should fail for invalid slot id");
         assert_eq!(
             region.generation(),
@@ -314,12 +370,19 @@ mod tests {
         let mut region = SharedRegion::open(&path, 2, "writer", true)
             .expect("shared region should open for writer");
         region.set_generation(u64::MAX - 1);
+        region.set_initialized(true);
 
         region
-            .publish(&[SimSharedSlot {
-                slot_id: 1,
-                value: SignalValue::Bool(true),
-            }])
+            .publish(&[
+                SimSharedSlot {
+                    slot_id: 0,
+                    value: SignalValue::F32(0.0),
+                },
+                SimSharedSlot {
+                    slot_id: 1,
+                    value: SignalValue::Bool(true),
+                },
+            ])
             .expect("publish should succeed near generation rollover");
 
         let generation = region.generation();
@@ -365,22 +428,27 @@ mod tests {
         let mut writer =
             SharedRegion::open(&path, 2, "writer", true).expect("writer should open shared region");
         writer
-            .publish(&[SimSharedSlot {
-                slot_id: 0,
-                value: SignalValue::F32(9.5),
-            }])
+            .publish(&[
+                SimSharedSlot {
+                    slot_id: 0,
+                    value: SignalValue::F32(9.5),
+                },
+                SimSharedSlot {
+                    slot_id: 1,
+                    value: SignalValue::Bool(false),
+                },
+            ])
             .expect("publish should succeed");
 
         let reopened = SharedRegion::open(&path, 2, "writer", true)
             .expect("reinitialized writer should reopen shared region");
-        let snapshot = reopened
+        let err = reopened
             .read_snapshot()
-            .expect("reinitialized snapshot should be readable");
-        assert!(
-            !snapshot
-                .iter()
-                .any(|slot| slot.slot_id == 0 && slot.value == SignalValue::F32(9.5)),
-            "reinitializing a writer should clear any previous snapshot data"
+            .expect_err("reinitialized writer should clear any previously published snapshot");
+        assert_eq!(
+            err,
+            SharedSnapshotError::Uninitialized,
+            "reinitializing a writer should leave the region unpublished until the writer publishes again"
         );
     }
 }

@@ -3,6 +3,9 @@ use crate::sim::types::SimSharedDesc;
 
 pub(super) fn process_shared_rx(state: &mut DaemonState) -> Result<(), String> {
     for (channel_name, attachment) in &state.shared_attached {
+        if attachment.writer {
+            continue;
+        }
         let slots = attachment
             .region
             .read_snapshot()

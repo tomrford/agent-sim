@@ -243,6 +243,10 @@ SimStatus sim_can_tx(uint32_t bus_id, SimCanFrame *out, uint32_t capacity,
 
 /**
  * @brief Shared-state channel descriptor.
+ *
+ * Contract:
+ * - `slot_count` is the full dense snapshot size for the channel.
+ * - Valid slot ids are exactly `0 .. slot_count-1`.
  */
 typedef struct {
   uint32_t id;
@@ -252,6 +256,10 @@ typedef struct {
 
 /**
  * @brief Shared-state slot payload.
+ *
+ * Contract:
+ * - `slot_id` must be within the owning channel's `slot_count`.
+ * - `type` and `value.type` must match exactly.
  */
 typedef struct {
   uint32_t slot_id;
@@ -270,12 +278,26 @@ SimStatus sim_shared_get_channels(SimSharedDesc *out, uint32_t capacity,
 
 /**
  * @brief Read inbound shared-state snapshot before sim_tick().
+ *
+ * Contract:
+ * - host provides exactly `slot_count` entries for the channel
+ * - slots are provided densely in ascending `slot_id` order
+ * - `count` must equal the channel's declared `slot_count`
  */
 SimStatus sim_shared_read(uint32_t channel_id, const SimSharedSlot *slots,
                           uint32_t count);
 
 /**
  * @brief Collect outbound shared-state snapshot after sim_tick().
+ *
+ * Contract:
+ * - DLL returns exactly `slot_count` entries for the channel
+ * - slots must be written densely in ascending `slot_id` order
+ * - if `capacity < slot_count`, DLL may write the dense prefix
+ *   `0 .. capacity-1`, must set `out_written` to the number of entries actually
+ *   written, and must return `SIM_ERR_BUFFER_TOO_SMALL`
+ * - host must discard partial results from `SIM_ERR_BUFFER_TOO_SMALL` and retry
+ *   with a buffer of size `slot_count`
  */
 SimStatus sim_shared_write(uint32_t channel_id, SimSharedSlot *out,
                            uint32_t capacity, uint32_t *out_written);
