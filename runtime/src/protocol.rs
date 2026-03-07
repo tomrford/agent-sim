@@ -18,12 +18,20 @@ pub enum ProtocolError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: Uuid,
-    pub action: Action,
+    pub action: RequestAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "target", content = "payload", rename_all = "snake_case")]
+pub enum RequestAction {
+    Instance(InstanceAction),
+    Worker(WorkerAction),
+    Env(EnvAction),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
-pub enum Action {
+pub enum InstanceAction {
     Ping,
     Load {
         load_spec: LoadSpec,
@@ -49,10 +57,6 @@ pub enum Action {
         multiplier: Option<f64>,
     },
     TimeStatus,
-    WorkerCanBuses,
-    WorkerStep {
-        can_rx: Vec<CanBusFramesData>,
-    },
     CanBuses,
     CanAttach {
         bus_name: String,
@@ -81,49 +85,66 @@ pub enum Action {
         data_hex: String,
         flags: Option<u8>,
     },
-    EnvStatus {
+    InstanceStatus,
+    InstanceList,
+    Close,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum WorkerAction {
+    CanBuses,
+    Step {
+        can_rx: Vec<CanBusFramesData>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum EnvAction {
+    Status {
         env: String,
     },
-    EnvReset {
+    Reset {
         env: String,
     },
-    EnvTimeStart {
+    TimeStart {
         env: String,
     },
-    EnvTimePause {
+    TimePause {
         env: String,
     },
-    EnvTimeStep {
+    TimeStep {
         env: String,
         duration: String,
     },
-    EnvTimeSpeed {
+    TimeSpeed {
         env: String,
         multiplier: Option<f64>,
     },
-    EnvTimeStatus {
+    TimeStatus {
         env: String,
     },
-    EnvCanBuses {
+    CanBuses {
         env: String,
     },
-    EnvCanLoadDbc {
+    CanLoadDbc {
         env: String,
         bus_name: String,
         path: String,
     },
-    EnvCanSend {
+    CanSend {
         env: String,
         bus_name: String,
         arb_id: u32,
         data_hex: String,
         flags: Option<u8>,
     },
-    EnvCanInspect {
+    CanInspect {
         env: String,
         bus_name: String,
     },
-    EnvCanScheduleAdd {
+    CanScheduleAdd {
         env: String,
         bus_name: String,
         job_id: Option<String>,
@@ -132,7 +153,7 @@ pub enum Action {
         every: String,
         flags: Option<u8>,
     },
-    EnvCanScheduleUpdate {
+    CanScheduleUpdate {
         env: String,
         job_id: String,
         arb_id: u32,
@@ -140,28 +161,25 @@ pub enum Action {
         every: String,
         flags: Option<u8>,
     },
-    EnvCanScheduleRemove {
+    CanScheduleRemove {
         env: String,
         job_id: String,
     },
-    EnvCanScheduleStop {
+    CanScheduleStop {
         env: String,
         job_id: String,
     },
-    EnvCanScheduleStart {
+    CanScheduleStart {
         env: String,
         job_id: String,
     },
-    EnvCanScheduleList {
+    CanScheduleList {
         env: String,
         bus_name: Option<String>,
     },
-    EnvClose {
+    Close {
         env: String,
     },
-    InstanceStatus,
-    InstanceList,
-    Close,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,19 +517,19 @@ mod tests {
     fn request_response_serde_roundtrip() {
         let request = Request {
             id: Uuid::new_v4(),
-            action: Action::Set {
+            action: RequestAction::Instance(InstanceAction::Set {
                 writes: BTreeMap::from([
                     ("hvac.power".to_string(), "true".to_string()),
                     ("hvac.target_temp".to_string(), "21.5".to_string()),
                 ]),
-            },
+            }),
         };
         let encoded_request =
             serde_json::to_string(&request).expect("request should serialize to json");
         let decoded_request: Request =
             serde_json::from_str(&encoded_request).expect("request should deserialize from json");
         match decoded_request.action {
-            Action::Set { writes } => {
+            RequestAction::Instance(InstanceAction::Set { writes }) => {
                 assert_eq!(writes.len(), 2);
             }
             other => panic!("expected set action, got {other:?}"),

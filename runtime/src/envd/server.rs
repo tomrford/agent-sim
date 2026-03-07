@@ -6,8 +6,8 @@ use crate::envd::lifecycle::pid_path;
 use crate::envd::spec::{EnvCanBusMemberSpec, EnvInstanceSpec, EnvSharedChannelSpec, EnvSpec};
 use crate::load::write_load_spec;
 use crate::protocol::{
-    Action, CanBusData, CanBusFramesData, CanFrameData, CanScheduleData, Request, Response,
-    ResponseData, parse_duration_us,
+    CanBusData, CanBusFramesData, CanFrameData, CanScheduleData, EnvAction, InstanceAction,
+    Request, RequestAction, Response, ResponseData, WorkerAction, parse_duration_us,
 };
 use crate::sim::time::TimeEngine;
 #[cfg(test)]
@@ -92,7 +92,7 @@ impl EnvState {
                 &instance.name,
                 &Request {
                     id: uuid::Uuid::new_v4(),
-                    action: Action::Info,
+                    action: RequestAction::Instance(InstanceAction::Info),
                 },
             )
             .await
@@ -124,7 +124,7 @@ impl EnvState {
                 &instance.name,
                 &Request {
                     id: uuid::Uuid::new_v4(),
-                    action: Action::WorkerCanBuses,
+                    action: RequestAction::Worker(WorkerAction::CanBuses),
                 },
             )
             .await
@@ -320,10 +320,15 @@ async fn handle_connection(
 async fn dispatch_request(request: Request, state: Arc<Mutex<EnvState>>) -> Response {
     let id = request.id;
     let result = match request.action {
-        Action::EnvTimeStep { env, duration } => dispatch_env_time_step(state, env, duration).await,
-        action => {
+        RequestAction::Env(EnvAction::TimeStep { env, duration }) => {
+            dispatch_env_time_step(state, env, duration).await
+        }
+        RequestAction::Env(action) => {
             let mut state = state.lock().await;
             dispatch_action(action, &mut state).await
+        }
+        RequestAction::Instance(_) | RequestAction::Worker(_) => {
+            Err("instance-owned action sent to env daemon".to_string())
         }
     };
     match result {
@@ -399,9 +404,9 @@ async fn advance_due_ticks(state: Arc<Mutex<EnvState>>, due_ticks: u64) -> Resul
     Ok(())
 }
 
-async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<ResponseData, String> {
+async fn dispatch_action(action: EnvAction, state: &mut EnvState) -> Result<ResponseData, String> {
     match action {
-        Action::EnvStatus { env } => {
+        EnvAction::Status { env } => {
             ensure_env_name(state, &env)?;
             Ok(ResponseData::EnvStatus {
                 env,
@@ -410,26 +415,26 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 tick_duration_us: state.tick_duration_us,
             })
         }
-        Action::EnvReset { env } => {
+        EnvAction::Reset { env } => {
             ensure_env_name(state, &env)?;
             for instance in &state.instances {
-                send_action_success(instance, Action::Reset).await?;
+                send_action_success(instance, InstanceAction::Reset).await?;
             }
             reset_env_can_state(state);
             state.time.reset();
             Ok(ResponseData::Ack)
         }
-        Action::EnvTimeStart { env } => {
+        EnvAction::TimeStart { env } => {
             ensure_env_name(state, &env)?;
             state.time.start().map_err(|err| err.to_string())?;
             env_time_status(state)
         }
-        Action::EnvTimePause { env } => {
+        EnvAction::TimePause { env } => {
             ensure_env_name(state, &env)?;
             state.time.pause().map_err(|err| err.to_string())?;
             env_time_status(state)
         }
-        Action::EnvTimeSpeed { env, multiplier } => {
+        EnvAction::TimeSpeed { env, multiplier } => {
             ensure_env_name(state, &env)?;
             if let Some(multiplier) = multiplier {
                 state
@@ -441,11 +446,11 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 speed: state.time.speed(),
             })
         }
-        Action::EnvTimeStatus { env } => {
+        EnvAction::TimeStatus { env } => {
             ensure_env_name(state, &env)?;
             env_time_status(state)
         }
-        Action::EnvCanBuses { env } => {
+        EnvAction::CanBuses { env } => {
             ensure_env_name(state, &env)?;
             let buses = state
                 .can_buses
@@ -462,7 +467,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanBuses { buses })
         }
-        Action::EnvCanLoadDbc {
+        EnvAction::CanLoadDbc {
             env,
             bus_name,
             path,
@@ -480,7 +485,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 signal_count,
             })
         }
-        Action::EnvCanSend {
+        EnvAction::CanSend {
             env,
             bus_name,
             arb_id,
@@ -496,7 +501,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 len: frame.len,
             })
         }
-        Action::EnvCanInspect { env, bus_name } => {
+        EnvAction::CanInspect { env, bus_name } => {
             ensure_env_name(state, &env)?;
             let bus = state
                 .can_buses
@@ -509,7 +514,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 frames: frames.iter().map(frame_data).collect(),
             })
         }
-        Action::EnvCanScheduleAdd {
+        EnvAction::CanScheduleAdd {
             env,
             bus_name,
             job_id,
@@ -544,7 +549,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             bus.schedules.insert(job_id, schedule);
             Ok(ResponseData::Ack)
         }
-        Action::EnvCanScheduleUpdate {
+        EnvAction::CanScheduleUpdate {
             env,
             job_id,
             arb_id,
@@ -561,7 +566,7 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             update_schedule(schedule, arb_id, data_hex, frame, every_ticks, current_tick);
             Ok(ResponseData::Ack)
         }
-        Action::EnvCanScheduleRemove { env, job_id } => {
+        EnvAction::CanScheduleRemove { env, job_id } => {
             ensure_env_name(state, &env)?;
             let (bus_name, _) = locate_schedule_mut(state, &job_id)?;
             let bus = state
@@ -571,19 +576,19 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
             bus.schedules.remove(&job_id);
             Ok(ResponseData::Ack)
         }
-        Action::EnvCanScheduleStop { env, job_id } => {
+        EnvAction::CanScheduleStop { env, job_id } => {
             ensure_env_name(state, &env)?;
             let (_, schedule) = locate_schedule_mut(state, &job_id)?;
             schedule.enabled = false;
             Ok(ResponseData::Ack)
         }
-        Action::EnvCanScheduleStart { env, job_id } => {
+        EnvAction::CanScheduleStart { env, job_id } => {
             ensure_env_name(state, &env)?;
             let (_, schedule) = locate_schedule_mut(state, &job_id)?;
             start_schedule(schedule);
             Ok(ResponseData::Ack)
         }
-        Action::EnvCanScheduleList { env, bus_name } => {
+        EnvAction::CanScheduleList { env, bus_name } => {
             ensure_env_name(state, &env)?;
             let schedules = state
                 .can_buses
@@ -604,12 +609,14 @@ async fn dispatch_action(action: Action, state: &mut EnvState) -> Result<Respons
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanSchedules { schedules })
         }
-        Action::EnvClose { env } => {
+        EnvAction::Close { env } => {
             ensure_env_name(state, &env)?;
             state.shutdown = true;
             Ok(ResponseData::Ack)
         }
-        other => Err(format!("unsupported env action: {other:?}")),
+        EnvAction::TimeStep { .. } => {
+            unreachable!("env time-step is handled before state-lock dispatch")
+        }
     }
 }
 
@@ -677,7 +684,7 @@ async fn advance_single_tick(state: &mut EnvState) -> Result<(), String> {
             &instance,
             &Request {
                 id: uuid::Uuid::new_v4(),
-                action: Action::WorkerStep { can_rx },
+                action: RequestAction::Worker(WorkerAction::Step { can_rx }),
             },
         )
         .await
@@ -758,7 +765,7 @@ async fn attach_shared_channel(
     for member in members {
         send_action_success(
             &member.instance_name,
-            Action::SharedAttach {
+            InstanceAction::SharedAttach {
                 channel_name: member.channel_name.clone(),
                 path: region_path_str.clone(),
                 writer: member.instance_name == shared.writer_instance,
@@ -919,12 +926,12 @@ fn env_time_status(state: &EnvState) -> Result<ResponseData, String> {
     })
 }
 
-async fn send_action_success(instance: &str, action: Action) -> Result<(), String> {
+async fn send_action_success(instance: &str, action: InstanceAction) -> Result<(), String> {
     let response = send_request(
         instance,
         &Request {
             id: uuid::Uuid::new_v4(),
-            action,
+            action: RequestAction::Instance(action),
         },
     )
     .await
@@ -1015,7 +1022,9 @@ async fn rollback_instances(started_instances: &[String]) {
 
 async fn shutdown_instances(instances: &[String]) {
     for instance in instances {
-        if send_action_success(instance, Action::Close).await.is_err()
+        if send_action_success(instance, InstanceAction::Close)
+            .await
+            .is_err()
             && let Some(pid) = read_pid(instance)
         {
             let _ = kill_pid(pid);
@@ -1261,7 +1270,10 @@ mod tests {
             drop(reader);
             let request: Request =
                 serde_json::from_str(line.trim_end()).expect("request json should parse");
-            assert!(matches!(request.action, Action::WorkerStep { .. }));
+            assert!(matches!(
+                request.action,
+                RequestAction::Worker(WorkerAction::Step { .. })
+            ));
             let response = Response::ok(
                 request.id,
                 ResponseData::WorkerStep {

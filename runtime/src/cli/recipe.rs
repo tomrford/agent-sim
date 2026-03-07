@@ -8,7 +8,8 @@ use crate::config::recipe::{
 use crate::connection::send_env_request;
 use crate::daemon::lifecycle;
 use crate::protocol::{
-    Action, RecipeStepKindData, RecipeStepResultData, ResponseData, SignalValueData,
+    EnvAction, InstanceAction, RequestAction, RecipeStepKindData, RecipeStepResultData,
+    ResponseData, SignalValueData,
 };
 use crate::sim::types::SignalValue;
 use std::collections::BTreeMap;
@@ -298,7 +299,7 @@ async fn execute_recipe_ops(
                 if !dry_run {
                     send_action_success(
                         &instance_name,
-                        Action::Set {
+                        InstanceAction::Set {
                             writes: writes.clone(),
                         },
                     )
@@ -320,7 +321,7 @@ async fn execute_recipe_ops(
                     if let Some(env_name) = attached_env_name(&instance_name).await? {
                         send_env_action_success(
                             &env_name,
-                            Action::EnvTimeStep {
+                            EnvAction::TimeStep {
                                 env: env_name.clone(),
                                 duration: duration.clone(),
                             },
@@ -329,7 +330,7 @@ async fn execute_recipe_ops(
                     } else {
                         send_action_success(
                             &instance_name,
-                            Action::TimeStep {
+                            InstanceAction::TimeStep {
                                 duration: duration.clone(),
                             },
                         )
@@ -365,7 +366,7 @@ async fn execute_recipe_ops(
                     if let Some(env_name) = attached_env_name(&instance_name).await? {
                         send_env_action_success(
                             &env_name,
-                            Action::EnvTimeSpeed {
+                            EnvAction::TimeSpeed {
                                 env: env_name.clone(),
                                 multiplier: Some(*speed),
                             },
@@ -374,7 +375,7 @@ async fn execute_recipe_ops(
                     } else {
                         send_action_success(
                             &instance_name,
-                            Action::TimeSpeed {
+                            InstanceAction::TimeSpeed {
                                 multiplier: Some(*speed),
                             },
                         )
@@ -390,7 +391,7 @@ async fn execute_recipe_ops(
             RecipeOp::Reset { instance } => {
                 let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    send_action_success(&instance_name, Action::Reset).await?;
+                    send_action_success(&instance_name, InstanceAction::Reset).await?;
                 }
                 results.push(step_result(
                     RecipeStepKindData::Reset,
@@ -440,7 +441,7 @@ async fn fetch_print_values(
 ) -> Result<Vec<SignalValueData>, CliError> {
     let response = send_action(
         session,
-        Action::Get {
+        InstanceAction::Get {
             selectors: selectors.to_vec(),
         },
     )
@@ -493,12 +494,12 @@ async fn attached_env_name(instance: &str) -> Result<Option<String>, CliError> {
         .and_then(|running_instance| running_instance.env))
 }
 
-async fn send_env_action_success(env: &str, action: Action) -> Result<(), CliError> {
+async fn send_env_action_success(env: &str, action: EnvAction) -> Result<(), CliError> {
     let response = send_env_request(
         env,
         &crate::protocol::Request {
             id: Uuid::new_v4(),
-            action,
+            action: RequestAction::Env(action),
         },
     )
     .await
