@@ -33,7 +33,7 @@ extern "C" {
 
 /** Major ABI version for this header contract. */
 #define SIM_API_VERSION_MAJOR 2U
-/** Minor ABI version for additive non-breaking changes. */
+/** Minor ABI version component for the exact runtime/DLL ABI handshake. */
 #define SIM_API_VERSION_MINOR 0U
 
 /** Runtime signal identifier (discovered via metadata APIs). */
