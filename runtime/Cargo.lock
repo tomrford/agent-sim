@@ -15,6 +15,7 @@ dependencies = [
  "libc",
  "libloading",
  "memmap2",
+ "peak-can-sys",
  "predicates",
  "serde",
  "serde_json",
@@ -677,6 +678,15 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "peak-can-sys"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a8f97c948e9782e0def40374d6e8fad3f4dceb00bdf555dc15f8a27c87efafe"
+dependencies = [
+ "libloading",
 ]
 
 [[package]]
