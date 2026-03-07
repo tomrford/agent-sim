@@ -26,3 +26,6 @@ assert_cmd = "2"
 predicates = "3"
 serial_test = "3"
 tempfile = "3"
+
+[target."cfg(windows)".dependencies]
+peak-can-sys = "0.2.0"
