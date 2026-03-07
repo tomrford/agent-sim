@@ -7,6 +7,7 @@ Use this when an autonomous agent needs to build, wire, and verify a DLL against
 - One loaded DLL = one running **instance**.
 - The ABI contract lives in `include/sim_api.h`.
 - The shared Zig ABI mirror lives in `include/sim_types.zig`.
+- The runtime requires an exact `sim_get_api_version()` match before loading a DLL.
 - CAN and shared-state are optional, but if you export any symbol from an optional surface you must export the full surface.
 - Shared-state channels are **dense snapshots**, not sparse maps.
 
@@ -77,6 +78,12 @@ nix develop -c bash -c 'cd examples/hvac && zig build test'
 ```sh
 nix build
 ```
+
+## Transport notes
+
+- Linux CAN transport uses SocketCAN interface names.
+- Windows CAN transport uses Peak CAN channel names such as `usb1` or `pci1`.
+- The current Windows Peak CAN backend includes common classic/FDCAN bitrate profiles and fails early on unsupported bitrate pairs instead of guessing.
 
 ## Useful smoke tests
 

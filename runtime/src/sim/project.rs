@@ -20,6 +20,7 @@ type SimReadValFn = unsafe extern "C" fn(u32, *mut SimValueRaw) -> u32;
 type SimWriteValFn = unsafe extern "C" fn(u32, *const SimValueRaw) -> u32;
 type SimGetSignalCountFn = unsafe extern "C" fn(*mut u32) -> u32;
 type SimGetSignalsFn = unsafe extern "C" fn(*mut SimSignalDescRaw, u32, *mut u32) -> u32;
+type SimGetApiVersionFn = unsafe extern "C" fn(*mut u32, *mut u32) -> u32;
 type SimGetTickDurationUsFn = unsafe extern "C" fn(*mut u32) -> u32;
 type SimFlashWriteFn = unsafe extern "C" fn(u32, *const u8, u32) -> u32;
 type SimCanGetBusesFn = unsafe extern "C" fn(*mut SimCanBusDescRaw, u32, *mut u32) -> u32;
@@ -36,6 +37,8 @@ const STATUS_NOT_INITIALIZED: u32 = 1;
 const STATUS_INVALID_SIGNAL: u32 = 3;
 const STATUS_TYPE_MISMATCH: u32 = 4;
 const STATUS_BUFFER_TOO_SMALL: u32 = 5;
+const SUPPORTED_API_VERSION_MAJOR: u32 = 2;
+const SUPPORTED_API_VERSION_MINOR: u32 = 0;
 
 struct ProjectCanApi {
     sim_can_rx: SimCanRxFn,
@@ -93,6 +96,9 @@ impl Project {
         let sim_get_signals: SimGetSignalsFn =
             *unsafe { library.get::<SimGetSignalsFn>(b"sim_get_signals\0") }
                 .map_err(|_| ProjectError::MissingSymbol("sim_get_signals"))?;
+        let sim_get_api_version: SimGetApiVersionFn =
+            *unsafe { library.get::<SimGetApiVersionFn>(b"sim_get_api_version\0") }
+                .map_err(|_| ProjectError::MissingSymbol("sim_get_api_version"))?;
         let sim_get_tick_duration_us: SimGetTickDurationUsFn =
             *unsafe { library.get::<SimGetTickDurationUsFn>(b"sim_get_tick_duration_us\0") }
                 .map_err(|_| ProjectError::MissingSymbol("sim_get_tick_duration_us"))?;
@@ -118,6 +124,24 @@ impl Project {
         let sim_shared_write = unsafe { library.get::<SimSharedWriteFn>(b"sim_shared_write\0") }
             .ok()
             .map(|symbol| *symbol);
+
+        {
+            let mut major = 0_u32;
+            let mut minor = 0_u32;
+            let status =
+                unsafe { sim_get_api_version(&mut major as *mut u32, &mut minor as *mut u32) };
+            if status != STATUS_OK {
+                return Err(ProjectError::LibraryLoad(format!(
+                    "sim_get_api_version failed with status {status}"
+                )));
+            }
+            if major != SUPPORTED_API_VERSION_MAJOR || minor != SUPPORTED_API_VERSION_MINOR {
+                return Err(ProjectError::LibraryLoad(format!(
+                    "ABI version mismatch: project reports {major}.{minor}, runtime requires {}.{}",
+                    SUPPORTED_API_VERSION_MAJOR, SUPPORTED_API_VERSION_MINOR
+                )));
+            }
+        }
 
         let tick_duration_us = {
             let mut value = 0_u32;

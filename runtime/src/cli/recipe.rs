@@ -8,7 +8,7 @@ use crate::config::recipe::{
 use crate::connection::send_env_request;
 use crate::daemon::lifecycle;
 use crate::protocol::{
-    EnvAction, InstanceAction, RequestAction, RecipeStepKindData, RecipeStepResultData,
+    EnvAction, InstanceAction, RecipeStepKindData, RecipeStepResultData, RequestAction,
     ResponseData, SignalValueData,
 };
 use crate::sim::types::SignalValue;

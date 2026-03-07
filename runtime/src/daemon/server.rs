@@ -273,7 +273,9 @@ async fn process_action_message(message: ActionMessage, state: &mut DaemonState)
 async fn handle_action(request: Request, state: &mut DaemonState) -> Response {
     let id = request.id;
     let result = match request.action {
-        RequestAction::Instance(action) => action_router::dispatch_instance_action(action, state).await,
+        RequestAction::Instance(action) => {
+            action_router::dispatch_instance_action(action, state).await
+        }
         RequestAction::Worker(action) => action_router::dispatch_worker_action(action, state).await,
         RequestAction::Env(_) => Err("env-owned action sent to instance daemon".to_string()),
     };

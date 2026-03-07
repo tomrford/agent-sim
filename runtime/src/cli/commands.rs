@@ -245,7 +245,8 @@ mod tests {
             })),
         };
         let request = to_request(&args).expect("can load-dbc request should build");
-        let RequestAction::Instance(InstanceAction::CanLoadDbc { path, .. }) = request.action else {
+        let RequestAction::Instance(InstanceAction::CanLoadDbc { path, .. }) = request.action
+        else {
             panic!("expected can load-dbc action");
         };
         assert_eq!(Path::new(&path), expected.as_path());

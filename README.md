@@ -37,6 +37,8 @@ CLI client  ◄── JSON lines over Unix sockets ──►  Env daemon (option
 
 Single binary. No external runtime dependencies. Cross-platform (Linux, macOS, Windows).
 
+DLLs are version-checked on load via `sim_get_api_version()`. The runtime accepts only the current ABI version.
+
 ## Concepts
 
 | Term         | Meaning                                                                      |
@@ -102,6 +104,11 @@ Use the `template/` scaffold. Edit `src/adapter.zig` (logic + signals) and `proj
 
 - Human-oriented authoring guide: `docs/template-guide.md`
 - Agent-oriented build/test guide: `docs/agent-guide.md`
+
+CAN transport notes:
+
+- Linux: SocketCAN interface names
+- Windows: Peak CAN channel names (`usb1`, `usb2`, `pci1`, ...)
 
 ## Project Structure
 
