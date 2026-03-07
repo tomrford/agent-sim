@@ -32,7 +32,7 @@ extern "C" {
  */
 
 /** Major ABI version for this header contract. */
-#define SIM_API_VERSION_MAJOR 1U
+#define SIM_API_VERSION_MAJOR 2U
 /** Minor ABI version for additive non-breaking changes. */
 #define SIM_API_VERSION_MINOR 0U
 
@@ -42,7 +42,8 @@ typedef uint32_t SignalId;
 /**
  * @brief Status codes returned by API calls.
  */
-typedef enum {
+typedef uint32_t SimStatus;
+enum {
   /** Call succeeded. */
   SIM_OK = 0,
 
@@ -65,18 +66,19 @@ typedef enum {
 
   /** Unexpected internal failure. */
   SIM_ERR_INTERNAL = 255,
-} SimStatus;
+};
 
 /**
  * @brief Runtime scalar types used by SimValue and signal metadata.
  */
-typedef enum {
+typedef uint32_t SimType;
+enum {
   SIM_TYPE_BOOL = 0,
   SIM_TYPE_U32 = 1,
   SIM_TYPE_I32 = 2,
   SIM_TYPE_F32 = 3,
   SIM_TYPE_F64 = 4,
-} SimType;
+};
 
 /**
  * @brief Tagged scalar value used by read/write APIs.
@@ -115,6 +117,15 @@ typedef struct {
   SimType type;
   const char *units;
 } SimSignalDesc;
+
+/**
+ * @brief Report the exact ABI version implemented by the DLL.
+ *
+ * Contract:
+ * - DLL must report the exact major/minor pair from this header
+ * - host treats any mismatch as incompatible and fails load early
+ */
+SimStatus sim_get_api_version(uint32_t *out_major, uint32_t *out_minor);
 
 /**
  * @brief Initialize simulation state.

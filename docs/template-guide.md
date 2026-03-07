@@ -8,6 +8,7 @@ The shared C ABI is defined in `include/sim_api.h`. Every DLL must export:
 
 | Symbol                     | Purpose                      |
 | -------------------------- | ---------------------------- |
+| `sim_get_api_version`      | Exact ABI version handshake  |
 | `sim_init`                 | Initialize deterministic startup state |
 | `sim_reset`                | Reset state to defaults      |
 | `sim_tick`                 | Advance one simulation step  |
@@ -19,6 +20,7 @@ The shared C ABI is defined in `include/sim_api.h`. Every DLL must export:
 
 Key rules:
 
+- `sim_get_api_version` must report the exact major/minor pair from `sim_api.h`.
 - State is singleton per loaded DLL process (no exported context handles).
 - Serialize calls into a loaded DLL (not thread-safe).
 - Signal IDs/types are discovered at runtime — never hardcode across builds.
@@ -68,6 +70,11 @@ The template now includes optional CAN hooks:
 By default, `src/adapter.zig` declares two example buses (`internal`, `external`) and
 stub RX/TX handlers. Keep or adapt this pattern if your firmware model needs CAN.
 If you don't need CAN, remove or ignore the bus declarations and keep TX empty.
+
+Transport notes:
+
+- Linux uses SocketCAN interface names.
+- Windows uses Peak CAN channel names such as `usb1`, `usb2`, `pci1`, ...
 
 ## Optional Shared-State Exports
 
