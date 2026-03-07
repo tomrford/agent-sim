@@ -7,18 +7,6 @@ use clap::{Args, Parser, Subcommand};
     about = "Stateful firmware simulation runtime CLI"
 )]
 pub struct CliArgs {
-    /// Internal daemon mode
-    #[arg(long, global = true, hide = true)]
-    pub daemon: bool,
-
-    /// Internal helper mode for detached instance bootstrap
-    #[arg(long, global = true, hide = true)]
-    pub bootstrap_instance: bool,
-
-    /// Internal env daemon mode
-    #[arg(long, global = true, hide = true)]
-    pub env_daemon: bool,
-
     /// JSON output mode
     #[arg(long, global = true, env = "AGENT_SIM_JSON", default_value_t = false)]
     pub json: bool,
@@ -31,26 +19,6 @@ pub struct CliArgs {
         default_value = "default"
     )]
     pub instance: String,
-
-    /// Internal daemon startup DLL path
-    #[arg(long, global = true, hide = true)]
-    pub libpath: Option<String>,
-
-    /// Internal daemon startup load spec path
-    #[arg(long, global = true, hide = true)]
-    pub load_spec_path: Option<String>,
-
-    /// Internal env tag metadata for daemon startup
-    #[arg(long, global = true, hide = true)]
-    pub env_tag: Option<String>,
-
-    /// Internal env daemon startup env name
-    #[arg(long, global = true, hide = true)]
-    pub env_name: Option<String>,
-
-    /// Internal env daemon startup env spec path
-    #[arg(long, global = true, hide = true)]
-    pub env_spec_path: Option<String>,
 
     /// Config file path
     #[arg(long, global = true, env = "AGENT_SIM_CONFIG")]

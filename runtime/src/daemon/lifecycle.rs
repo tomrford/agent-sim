@@ -7,8 +7,16 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceRuntimeInfo {
+    pub name: String,
+    pub socket_path: PathBuf,
+    pub running: bool,
+    pub env: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SessionRegistry;
+pub struct InstanceRegistry;
 
 pub fn session_root() -> PathBuf {
     if let Some(path) = std::env::var_os("AGENT_SIM_HOME") {
@@ -37,14 +45,14 @@ pub fn bootstrap_dir() -> PathBuf {
 }
 
 pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
-    SessionRegistry.ensure_running(session).await
+    InstanceRegistry.ensure_running(session).await
 }
 
 pub async fn bootstrap_daemon(session: &str, load_spec: &LoadSpec) -> Result<(), DaemonError> {
-    SessionRegistry.bootstrap(session, load_spec).await
+    InstanceRegistry.bootstrap(session, load_spec).await
 }
 
-impl SessionRegistry {
+impl InstanceRegistry {
     pub async fn ensure_running(self, session: &str) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
         let socket = socket_path(session);
@@ -110,7 +118,8 @@ impl SessionRegistry {
         let exe = std::env::current_exe()?;
         let mut command = std::process::Command::new(exe);
         command
-            .arg("--daemon")
+            .arg("__internal")
+            .arg("instance-daemon")
             .arg("--instance")
             .arg(session)
             .arg("--load-spec-path")
@@ -121,9 +130,7 @@ impl SessionRegistry {
         Ok(child)
     }
 
-    pub async fn list_sessions(
-        self,
-    ) -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
+    pub async fn list_instances(self) -> Result<Vec<InstanceRuntimeInfo>, DaemonError> {
         let root = session_root();
         std::fs::create_dir_all(&root)?;
         let mut out = Vec::new();
@@ -138,15 +145,20 @@ impl SessionRegistry {
             };
             let running = can_connect(&path).await;
             let env = read_env_tag(stem);
-            out.push((stem.to_string(), path, running, env));
+            out.push(InstanceRuntimeInfo {
+                name: stem.to_string(),
+                socket_path: path,
+                running,
+                env,
+            });
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
 }
 
-pub async fn list_sessions() -> Result<Vec<(String, PathBuf, bool, Option<String>)>, DaemonError> {
-    SessionRegistry.list_sessions().await
+pub async fn list_instances() -> Result<Vec<InstanceRuntimeInfo>, DaemonError> {
+    InstanceRegistry.list_instances().await
 }
 
 fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &Path) {
@@ -157,40 +169,6 @@ fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &P
 
 async fn can_connect(socket: &Path) -> bool {
     UnixStream::connect(socket).await.is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::cleanup_bootstrap_timeout;
-    use std::process::{Command, Stdio};
-
-    #[cfg(unix)]
-    #[test]
-    fn timeout_cleanup_kills_child_and_removes_bootstrap_file() {
-        let bootstrap = tempfile::NamedTempFile::new().expect("temp bootstrap file");
-        let bootstrap_path = bootstrap.path().to_path_buf();
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("sleep child should spawn");
-
-        cleanup_bootstrap_timeout(&mut child, &bootstrap_path);
-
-        assert!(
-            !bootstrap_path.exists(),
-            "bootstrap file should be removed during timeout cleanup"
-        );
-        assert!(
-            child
-                .try_wait()
-                .expect("child status should be queryable")
-                .is_some(),
-            "timed-out child should be reaped"
-        );
-    }
 }
 
 pub fn write_env_tag(session: &str, env: Option<&str>) -> Result<(), DaemonError> {
@@ -242,5 +220,39 @@ pub fn kill_pid(pid: u32) -> Result<(), DaemonError> {
         Err(DaemonError::Request(
             "pid kill fallback is not supported on this platform".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_bootstrap_timeout;
+    use std::process::{Command, Stdio};
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_cleanup_kills_child_and_removes_bootstrap_file() {
+        let bootstrap = tempfile::NamedTempFile::new().expect("temp bootstrap file");
+        let bootstrap_path = bootstrap.path().to_path_buf();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep child should spawn");
+
+        cleanup_bootstrap_timeout(&mut child, &bootstrap_path);
+
+        assert!(
+            !bootstrap_path.exists(),
+            "bootstrap file should be removed during timeout cleanup"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("child status should be queryable")
+                .is_some(),
+            "timed-out child should be reaped"
+        );
     }
 }

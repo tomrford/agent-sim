@@ -808,7 +808,7 @@ fn parse_env_frame(
     data_hex: &str,
     flags: u8,
 ) -> Result<SimCanFrame, String> {
-    let payload = parse_data_hex(data_hex)?;
+    let payload = crate::can::parse_data_hex(data_hex)?;
     let mut data = [0_u8; 64];
     data[..payload.len()].copy_from_slice(&payload);
     let frame = SimCanFrame {
@@ -964,7 +964,8 @@ async fn run_bootstrap_instance_command(
     spec_path: &Path,
 ) -> Result<std::process::Output, String> {
     tokio::process::Command::new(exe)
-        .arg("--bootstrap-instance")
+        .arg("__internal")
+        .arg("bootstrap-instance")
         .arg("--instance")
         .arg(instance_name)
         .arg("--load-spec-path")
@@ -1020,34 +1021,6 @@ async fn shutdown_instances(instances: &[String]) {
             let _ = kill_pid(pid);
         }
     }
-}
-
-fn parse_data_hex(raw: &str) -> Result<Vec<u8>, String> {
-    let compact = raw
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && *ch != '_')
-        .collect::<String>();
-    if compact.len() % 2 != 0 {
-        return Err(format!(
-            "invalid CAN payload hex '{raw}': expected an even number of hex characters"
-        ));
-    }
-    if compact.len() / 2 > 64 {
-        return Err(format!(
-            "invalid CAN payload hex '{raw}': payload exceeds 64 bytes"
-        ));
-    }
-    let mut payload = Vec::with_capacity(compact.len() / 2);
-    let bytes = compact.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        let pair = format!("{}{}", bytes[idx] as char, bytes[idx + 1] as char);
-        let value = u8::from_str_radix(&pair, 16)
-            .map_err(|_| format!("invalid CAN payload hex '{raw}': bad byte '{pair}'"))?;
-        payload.push(value);
-        idx += 2;
-    }
-    Ok(payload)
 }
 
 #[cfg(test)]
