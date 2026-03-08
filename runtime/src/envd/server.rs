@@ -11,7 +11,7 @@ use crate::can::CanSocket;
 use crate::can::dbc::{DbcBusOverlay, frame_key_from_frame};
 use crate::daemon::lifecycle::{kill_pid, read_pid};
 use crate::envd::lifecycle::pid_path;
-use crate::envd::spec::{EnvCanBusMemberSpec, EnvSpec};
+use crate::envd::spec::EnvSpec;
 use crate::protocol::{
     CanFrameData, InstanceAction, Request, RequestAction, Response, parse_duration_us,
 };
@@ -19,7 +19,7 @@ use crate::sim::time::TimeEngine;
 #[cfg(test)]
 use crate::sim::types::CAN_FLAG_EXTENDED;
 use crate::sim::types::SimCanFrame;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -34,8 +34,6 @@ struct EnvState {
     instance_workers: HashMap<String, instance_worker::InstanceWorker>,
     time: TimeEngine,
     can_buses: BTreeMap<String, EnvCanBusState>,
-    instance_bus_map: HashMap<(String, String), String>,
-    ignored_instance_buses: HashSet<(String, String)>,
     shutdown: bool,
 }
 
@@ -45,18 +43,10 @@ struct EnvCanBusState {
     fd_capable: bool,
     bitrate: u32,
     bitrate_data: u32,
-    members: Vec<EnvCanBusMemberSpec>,
     socket: CanSocket,
     dbc: Option<DbcBusOverlay>,
     latest_frames: HashMap<u32, SimCanFrame>,
-    pending_delivery: Vec<PendingFrame>,
     schedules: BTreeMap<String, CanScheduleJob>,
-}
-
-#[derive(Clone)]
-struct PendingFrame {
-    source_instance: Option<String>,
-    frame: SimCanFrame,
 }
 
 #[derive(Clone)]
@@ -254,7 +244,6 @@ fn reset_env_can_state(state: &mut EnvState) {
     for bus in state.can_buses.values_mut() {
         let _ = bus.socket.recv_all();
         bus.latest_frames.clear();
-        bus.pending_delivery.clear();
         for schedule in bus.schedules.values_mut() {
             schedule.next_due_tick = 0;
         }
@@ -281,25 +270,29 @@ fn parse_env_frame(
     Ok(frame)
 }
 
-fn queue_env_frame(
-    state: &mut EnvState,
-    bus_name: &str,
-    source_instance: Option<String>,
-    frame: &SimCanFrame,
-) -> Result<(), String> {
+fn send_env_frame(state: &mut EnvState, bus_name: &str, frame: &SimCanFrame) -> Result<(), String> {
     validate_env_frame(state, bus_name, frame)?;
     let bus = state
         .can_buses
         .get_mut(bus_name)
         .ok_or_else(|| format!("env CAN bus '{bus_name}' not found"))?;
     bus.socket.send(frame)?;
+    record_env_frame(bus, frame);
+    Ok(())
+}
+
+fn observe_env_bus_frames(state: &mut EnvState) -> Result<(), String> {
+    for bus in state.can_buses.values_mut() {
+        for frame in bus.socket.recv_all()? {
+            record_env_frame(bus, &frame);
+        }
+    }
+    Ok(())
+}
+
+fn record_env_frame(bus: &mut EnvCanBusState, frame: &SimCanFrame) {
     bus.latest_frames
         .insert(frame_key_from_frame(frame), frame.clone());
-    bus.pending_delivery.push(PendingFrame {
-        source_instance,
-        frame: frame.clone(),
-    });
-    Ok(())
 }
 
 fn validate_env_frame(state: &EnvState, bus_name: &str, frame: &SimCanFrame) -> Result<(), String> {
@@ -417,7 +410,7 @@ mod tests {
     use super::*;
     use crate::envd::spec::EnvInstanceSpec;
     use crate::load::LoadSpec;
-    use crate::protocol::{CanBusFramesData, CanFrameWireData, ResponseData, WorkerAction};
+    use crate::protocol::{ResponseData, WorkerAction};
     use serial_test::serial;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -544,43 +537,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_env_bus_name_skips_unmapped_bus_once() {
-        let mut state = EnvState {
-            name: "env".to_string(),
-            socket_path: PathBuf::new(),
-            tick_duration_us: 20,
-            instances: vec!["instance-a".to_string()],
-            instance_workers: HashMap::new(),
-            time: TimeEngine::default(),
-            can_buses: BTreeMap::new(),
-            instance_bus_map: HashMap::from([(
-                ("instance-a".to_string(), "external".to_string()),
-                "env-external".to_string(),
-            )]),
-            ignored_instance_buses: HashSet::new(),
-            shutdown: false,
-        };
-
-        let mapped = tick::resolve_env_bus_name(&mut state, "instance-a", "external");
-        assert_eq!(mapped.as_deref(), Some("env-external"));
-        assert!(state.ignored_instance_buses.is_empty());
-
-        let first_unmapped = tick::resolve_env_bus_name(&mut state, "instance-a", "internal");
-        let second_unmapped = tick::resolve_env_bus_name(&mut state, "instance-a", "internal");
-        assert!(first_unmapped.is_none());
-        assert!(second_unmapped.is_none());
-        assert_eq!(state.ignored_instance_buses.len(), 1);
-        assert!(
-            state
-                .ignored_instance_buses
-                .contains(&("instance-a".to_string(), "internal".to_string()))
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     #[serial]
-    async fn advance_single_tick_ignores_unmapped_instance_bus() {
+    async fn advance_single_tick_issues_direct_worker_step() {
         let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
         let original_home = std::env::var_os("AGENT_SIM_HOME");
         unsafe {
@@ -613,22 +572,9 @@ mod tests {
                 serde_json::from_str(line.trim_end()).expect("request json should parse");
             assert!(matches!(
                 request.action,
-                RequestAction::Worker(WorkerAction::Step { .. })
+                RequestAction::Worker(WorkerAction::Step)
             ));
-            let response = Response::ok(
-                request.id,
-                ResponseData::WorkerStep {
-                    can_tx: vec![CanBusFramesData {
-                        bus_name: "internal".to_string(),
-                        frames: vec![CanFrameWireData {
-                            arb_id: 0x321,
-                            len: 2,
-                            flags: 0,
-                            data: vec![0xAB, 0xCD],
-                        }],
-                    }],
-                },
-            );
+            let response = Response::ok(request.id, ResponseData::Ack);
             let mut payload = serde_json::to_string(&response).expect("response should serialize");
             payload.push('\n');
             stream
@@ -648,23 +594,15 @@ mod tests {
             instance_workers: HashMap::from([(instance.to_string(), worker)]),
             time: TimeEngine::default(),
             can_buses: BTreeMap::new(),
-            instance_bus_map: HashMap::new(),
-            ignored_instance_buses: HashSet::new(),
             shutdown: false,
         };
 
         tick::advance_single_tick(&mut state)
             .await
-            .expect("unmapped instance buses should be ignored");
+            .expect("worker step should succeed");
         server.await.expect("fake instance task should finish");
 
         assert_eq!(state.time.status(state.tick_duration_us).elapsed_ticks, 1);
-        assert_eq!(state.ignored_instance_buses.len(), 1);
-        assert!(
-            state
-                .ignored_instance_buses
-                .contains(&(instance.to_string(), "internal".to_string()))
-        );
 
         restore_agent_sim_home(original_home);
     }

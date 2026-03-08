@@ -3,6 +3,17 @@ use crate::can::dbc::frame_key_from_frame;
 use crate::sim::types::{SimCanBusDesc, SimCanFrame};
 
 pub(super) fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
+    let received = recv_can_frames(state)?;
+    deliver_can_frames(state, &received)?;
+    Ok(())
+}
+
+pub(super) fn discard_can_rx(state: &mut DaemonState) -> Result<(), String> {
+    let _ = recv_can_frames(state)?;
+    Ok(())
+}
+
+fn recv_can_frames(state: &mut DaemonState) -> Result<Vec<(String, SimCanFrame)>, String> {
     let mut frame_updates = Vec::new();
     for (bus_name, attachment) in &mut state.can_attached {
         let frames = attachment.socket.recv_all()?;
@@ -13,13 +24,33 @@ pub(super) fn process_can_rx(state: &mut DaemonState) -> Result<(), String> {
             crate::can::validate_frame(&attachment.meta.name, attachment.meta.fd_capable, frame)?;
             frame_updates.push((bus_name.clone(), frame.clone()));
         }
+    }
+    Ok(frame_updates)
+}
+
+fn deliver_can_frames(
+    state: &mut DaemonState,
+    frame_updates: &[(String, SimCanFrame)],
+) -> Result<(), String> {
+    let mut frames_by_bus = std::collections::BTreeMap::<String, Vec<SimCanFrame>>::new();
+    for (bus_name, frame) in frame_updates {
+        frames_by_bus
+            .entry(bus_name.clone())
+            .or_default()
+            .push(frame.clone());
+    }
+    for (bus_name, frames) in frames_by_bus {
+        let attachment = state
+            .can_attached
+            .get(&bus_name)
+            .ok_or_else(|| format!("CAN bus '{bus_name}' is not attached"))?;
         state
             .project
             .can_rx(attachment.meta.id, &frames)
             .map_err(|e| format!("sim_can_rx failed for bus '{bus_name}': {e}"))?;
     }
     for (bus_name, frame) in frame_updates {
-        record_frame(state, &bus_name, &frame);
+        record_frame(state, bus_name, frame);
     }
     Ok(())
 }

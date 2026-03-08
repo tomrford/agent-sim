@@ -209,9 +209,6 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Some(ResponseData::DbcLoaded { bus, signal_count }) => {
             println!("Loaded DBC for {bus}: {signal_count} signals");
         }
-        Some(ResponseData::WorkerStep { can_tx }) => {
-            println!("Worker CAN TX batches: {}", can_tx.len());
-        }
         Some(ResponseData::SharedChannels { channels }) => {
             let mut table = Table::new();
             table
