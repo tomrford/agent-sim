@@ -5,7 +5,7 @@ use crate::daemon::lifecycle::{kill_pid, read_pid};
 use crate::envd::spec::{EnvInstanceSpec, EnvSpec};
 use crate::load::write_load_spec;
 use crate::protocol::{CanBusData, InstanceAction, ResponseData, WorkerAction};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 impl EnvState {
@@ -102,8 +102,8 @@ impl EnvState {
             instance_can_buses.insert(instance_name, buses);
         }
 
-        let mut instance_bus_map = HashMap::new();
         let mut can_buses = BTreeMap::new();
+        let mut attached_members = HashSet::new();
         for bus_spec in &env_spec.can_buses {
             let mut fd_capable = false;
             let mut bitrate = 0_u32;
@@ -130,12 +130,7 @@ impl EnvState {
                 fd_capable |= meta.fd_capable;
                 bitrate = bitrate.max(meta.bitrate);
                 bitrate_data = bitrate_data.max(meta.bitrate_data);
-                if instance_bus_map
-                    .insert(
-                        (member.instance_name.clone(), member.bus_name.clone()),
-                        bus_spec.name.clone(),
-                    )
-                    .is_some()
+                if !attached_members.insert((member.instance_name.clone(), member.bus_name.clone()))
                 {
                     return Err(format!(
                         "instance '{}:{}' is attached to multiple env CAN buses",
@@ -157,14 +152,38 @@ impl EnvState {
                     fd_capable,
                     bitrate,
                     bitrate_data,
-                    members: bus_spec.members.clone(),
                     socket,
                     dbc,
                     latest_frames: HashMap::new(),
-                    pending_delivery: Vec::new(),
                     schedules: BTreeMap::new(),
                 },
             );
+        }
+
+        for bus_spec in &env_spec.can_buses {
+            for member in &bus_spec.members {
+                let worker = instance_workers.get(&member.instance_name).ok_or_else(|| {
+                    format!("missing env worker for instance '{}'", member.instance_name)
+                })?;
+                let response_rx = worker
+                    .begin_worker_request(WorkerAction::CanAttach {
+                        bus_name: member.bus_name.clone(),
+                        vcan_iface: bus_spec.vcan_iface.clone(),
+                    })
+                    .await?;
+                let response = response_rx.await.map_err(|_| {
+                    format!(
+                        "CAN attach response channel closed for instance '{}'",
+                        member.instance_name
+                    )
+                })??;
+                if !matches!(response, ResponseData::Ack) {
+                    return Err(format!(
+                        "unexpected CAN attach payload while bootstrapping instance '{}'",
+                        member.instance_name
+                    ));
+                }
+            }
         }
 
         for shared in &env_spec.shared_channels {
@@ -183,8 +202,6 @@ impl EnvState {
             instance_workers,
             time: crate::sim::time::TimeEngine::default(),
             can_buses,
-            instance_bus_map,
-            ignored_instance_buses: std::collections::HashSet::new(),
             shutdown: false,
         })
     }

@@ -3,9 +3,8 @@ use super::{can_ops, shared_ops};
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
-    CanBusData, CanBusFramesData, InstanceAction, InstanceInfoData, ResponseData,
-    SharedChannelData, SharedSlotValueData, SignalData, SignalValueData, WorkerAction,
-    parse_duration_us,
+    CanBusData, InstanceAction, InstanceInfoData, ResponseData, SharedChannelData,
+    SharedSlotValueData, SignalData, SignalValueData, WorkerAction, parse_duration_us,
 };
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
@@ -176,19 +175,7 @@ pub(super) async fn dispatch_instance_action(
             vcan_iface,
         } => {
             reject_local_can_control(state)?;
-            if state.can_attached.contains_key(&bus_name) {
-                return Err(format!("CAN bus '{bus_name}' is already attached"));
-            }
-            let meta = can_ops::find_can_bus_meta(state, &bus_name)?;
-            let socket = CanSocket::open(
-                &vcan_iface,
-                meta.bitrate,
-                meta.bitrate_data,
-                meta.fd_capable,
-            )?;
-            state
-                .can_attached
-                .insert(bus_name.clone(), super::AttachedCanBus { meta, socket });
+            attach_can_bus(state, &bus_name, &vcan_iface)?;
             Ok(ResponseData::Ack)
         }
         InstanceAction::CanDetach { bus_name } => {
@@ -357,41 +344,21 @@ pub(super) async fn dispatch_worker_action(
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanBuses { buses })
         }
-        WorkerAction::Step { can_rx } => {
-            for batch in &can_rx {
-                let meta = can_ops::find_can_bus_meta(state, &batch.bus_name)?;
-                let frames = batch
-                    .frames
-                    .iter()
-                    .cloned()
-                    .map(crate::sim::types::SimCanFrame::try_from)
-                    .collect::<Result<Vec<_>, _>>()?;
-                for frame in &frames {
-                    crate::can::validate_frame(&meta.name, meta.fd_capable, frame)?;
-                }
-                state
-                    .project
-                    .can_rx(meta.id, &frames)
-                    .map_err(|e| format!("sim_can_rx failed for bus '{}': {e}", batch.bus_name))?;
-            }
-            shared_ops::process_shared_rx(state)?;
-            state.project.tick().map_err(|e| e.to_string())?;
-            let mut can_tx = Vec::new();
-            for bus in state.project.can_buses() {
-                let frames = state
-                    .project
-                    .can_tx(bus.id)
-                    .map_err(|e| format!("sim_can_tx failed for bus '{}': {e}", bus.name))?;
-                if !frames.is_empty() {
-                    can_tx.push(CanBusFramesData {
-                        bus_name: bus.name.clone(),
-                        frames: frames.iter().map(Into::into).collect(),
-                    });
-                }
-            }
-            shared_ops::process_shared_tx(state)?;
+        WorkerAction::CanAttach {
+            bus_name,
+            vcan_iface,
+        } => {
+            attach_can_bus(state, &bus_name, &vcan_iface)?;
+            Ok(ResponseData::Ack)
+        }
+        WorkerAction::CanDiscardPendingRx => {
+            can_ops::discard_can_rx(state)?;
+            Ok(ResponseData::Ack)
+        }
+        WorkerAction::Step => {
+            advance_single_project_tick(state).map_err(TickStepError::into_message)?;
             state.time.advance_ticks(1);
-            Ok(ResponseData::WorkerStep { can_tx })
+            Ok(ResponseData::Ack)
         }
     }
 }
@@ -430,30 +397,71 @@ fn read_selected_signal_values(
 fn advance_project_ticks_for_request(state: &mut DaemonState, ticks: u64) -> Result<(), String> {
     let mut processed = 0_u64;
     for _ in 0..ticks {
-        if let Err(err) = can_ops::process_can_rx(state) {
-            state.time.advance_ticks(processed);
-            return Err(err);
-        }
-        if let Err(err) = shared_ops::process_shared_rx(state) {
-            state.time.advance_ticks(processed);
-            return Err(err);
-        }
-        if let Err(err) = state.project.tick() {
-            state.time.advance_ticks(processed);
-            return Err(err.to_string());
-        }
-        if let Err(err) = can_ops::process_can_tx(state) {
-            state.time.advance_ticks(processed.saturating_add(1));
-            return Err(err);
-        }
-        if let Err(err) = shared_ops::process_shared_tx(state) {
-            state.time.advance_ticks(processed.saturating_add(1));
-            return Err(err);
+        if let Err(err) = advance_single_project_tick(state) {
+            state.time.advance_ticks(if err.advance_tick() {
+                processed.saturating_add(1)
+            } else {
+                processed
+            });
+            return Err(err.into_message());
         }
         processed = processed.saturating_add(1);
     }
     state.time.advance_ticks(processed);
     Ok(())
+}
+
+pub(super) fn advance_single_project_tick(state: &mut DaemonState) -> Result<(), TickStepError> {
+    can_ops::process_can_rx(state).map_err(TickStepError::pre_tick)?;
+    shared_ops::process_shared_rx(state).map_err(TickStepError::pre_tick)?;
+    state
+        .project
+        .tick()
+        .map_err(|e| TickStepError::pre_tick(e.to_string()))?;
+    can_ops::process_can_tx(state).map_err(TickStepError::post_tick)?;
+    shared_ops::process_shared_tx(state).map_err(TickStepError::post_tick)?;
+    Ok(())
+}
+
+fn attach_can_bus(state: &mut DaemonState, bus_name: &str, vcan_iface: &str) -> Result<(), String> {
+    if state.can_attached.contains_key(bus_name) {
+        return Err(format!("CAN bus '{bus_name}' is already attached"));
+    }
+    let meta = can_ops::find_can_bus_meta(state, bus_name)?;
+    let socket = CanSocket::open(vcan_iface, meta.bitrate, meta.bitrate_data, meta.fd_capable)?;
+    state
+        .can_attached
+        .insert(bus_name.to_string(), super::AttachedCanBus { meta, socket });
+    Ok(())
+}
+
+pub(super) struct TickStepError {
+    message: String,
+    advance_tick: bool,
+}
+
+impl TickStepError {
+    fn pre_tick(message: String) -> Self {
+        Self {
+            message,
+            advance_tick: false,
+        }
+    }
+
+    fn post_tick(message: String) -> Self {
+        Self {
+            message,
+            advance_tick: true,
+        }
+    }
+
+    pub(super) fn advance_tick(&self) -> bool {
+        self.advance_tick
+    }
+
+    pub(super) fn into_message(self) -> String {
+        self.message
+    }
 }
 
 fn reject_local_time_control(state: &DaemonState) -> Result<(), String> {

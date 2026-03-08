@@ -1,5 +1,5 @@
+use super::action_router::advance_single_project_tick;
 use super::{ActionMessage, DaemonState, process_action_message};
-use super::{can_ops, shared_ops};
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
@@ -45,25 +45,13 @@ pub(super) async fn run_tick_task(
 fn advance_project_ticks(state: &mut DaemonState, ticks: u64) -> Result<(), String> {
     let mut processed = 0_u64;
     for _ in 0..ticks {
-        if let Err(err) = can_ops::process_can_rx(state) {
-            state.time.advance_ticks(processed);
-            return Err(err);
-        }
-        if let Err(err) = shared_ops::process_shared_rx(state) {
-            state.time.advance_ticks(processed);
-            return Err(err);
-        }
-        if let Err(err) = state.project.tick() {
-            state.time.advance_ticks(processed);
-            return Err(err.to_string());
-        }
-        if let Err(err) = can_ops::process_can_tx(state) {
-            state.time.advance_ticks(processed.saturating_add(1));
-            return Err(err);
-        }
-        if let Err(err) = shared_ops::process_shared_tx(state) {
-            state.time.advance_ticks(processed.saturating_add(1));
-            return Err(err);
+        if let Err(err) = advance_single_project_tick(state) {
+            state.time.advance_ticks(if err.advance_tick() {
+                processed.saturating_add(1)
+            } else {
+                processed
+            });
+            return Err(err.into_message());
         }
         processed = processed.saturating_add(1);
     }

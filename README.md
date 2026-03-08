@@ -29,10 +29,10 @@ agent-sim close
 ## Architecture
 
 ```
-CLI client  ◄── JSON lines over Unix sockets ──►  Env daemon (optional, env-owned time/CAN)
+CLI client  ◄── JSON lines over Unix sockets ──►  Env daemon (optional, env-owned time/CAN control)
                                                    ├─ Instance daemons
                                                    │  └─ Project (dlopen DLL, sim_api.h ABI)
-                                                   └─ Env-owned CAN manager / logical time
+                                                   └─ Env-owned logical time + CAN send/schedule/inspect
 ```
 
 Single binary. No external runtime dependencies. Cross-platform (Linux, macOS, Windows).
@@ -48,7 +48,7 @@ DLLs are version-checked on load via `sim_get_api_version()`. The runtime accept
 | **Tick**     | One simulation quantum. Duration from `sim_get_tick_duration_us()`           |
 | **Device**   | Reusable library + optional flash preload definition                          |
 | **Instance** | Running simulated instance of a device                                        |
-| **Env**      | Coordinated collection of instances with env-owned time and CAN              |
+| **Env**      | Coordinated collection of instances with env-owned time and env CAN control  |
 | **Recipe**   | Named command sequence in `agent-sim.toml`                                   |
 
 ## Commands
@@ -109,6 +109,8 @@ CAN transport notes:
 
 - Linux: SocketCAN interface names
 - Windows: Peak CAN channel names (`usb1`, `usb2`, `pci1`, ...)
+
+In env mode, mapped instances attach directly to the shared CAN interface. The env daemon still owns env time control, `env can ...` commands, schedules, and inspect/DBC helpers.
 
 ## Project Structure
 

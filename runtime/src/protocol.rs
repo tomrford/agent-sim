@@ -94,7 +94,12 @@ pub enum InstanceAction {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WorkerAction {
     CanBuses,
-    Step { can_rx: Vec<CanBusFramesData> },
+    CanAttach {
+        bus_name: String,
+        vcan_iface: String,
+    },
+    CanDiscardPendingRx,
+    Step,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,9 +274,6 @@ pub enum ResponseData {
     DbcLoaded {
         bus: String,
         signal_count: usize,
-    },
-    WorkerStep {
-        can_tx: Vec<CanBusFramesData>,
     },
     SharedChannels {
         channels: Vec<SharedChannelData>,

@@ -1,10 +1,12 @@
 use super::{
     CanScheduleJob, EnvState, duration_to_env_ticks, frame_data, locate_schedule_bus,
-    locate_schedule_mut, parse_env_frame, queue_env_frame, reset_env_can_state, start_schedule,
+    locate_schedule_mut, parse_env_frame, reset_env_can_state, send_env_frame, start_schedule,
     update_schedule,
 };
 use crate::can::dbc::DbcBusOverlay;
-use crate::protocol::{CanBusData, CanScheduleData, EnvAction, InstanceAction, ResponseData};
+use crate::protocol::{
+    CanBusData, CanScheduleData, EnvAction, InstanceAction, ResponseData, WorkerAction,
+};
 
 pub(super) async fn dispatch_action(
     action: EnvAction,
@@ -38,6 +40,27 @@ pub(super) async fn dispatch_action(
                 if !matches!(response, ResponseData::Ack) {
                     return Err(format!(
                         "unexpected reset payload while resetting instance '{instance}'"
+                    ));
+                }
+            }
+            let mut pending_discard = Vec::with_capacity(state.instances.len());
+            for instance in &state.instances {
+                let worker = state
+                    .instance_workers
+                    .get(instance)
+                    .ok_or_else(|| format!("missing env worker for instance '{instance}'"))?;
+                let response_rx = worker
+                    .begin_worker_request(WorkerAction::CanDiscardPendingRx)
+                    .await?;
+                pending_discard.push((instance.clone(), response_rx));
+            }
+            for (instance, response_rx) in pending_discard {
+                let response = response_rx.await.map_err(|_| {
+                    format!("CAN discard response channel closed for instance '{instance}'")
+                })??;
+                if !matches!(response, ResponseData::Ack) {
+                    return Err(format!(
+                        "unexpected CAN discard payload while resetting instance '{instance}'"
                     ));
                 }
             }
@@ -115,7 +138,7 @@ pub(super) async fn dispatch_action(
         } => {
             ensure_env_name(state, &env)?;
             let frame = parse_env_frame(state, &bus_name, arb_id, &data_hex, flags.unwrap_or(0))?;
-            queue_env_frame(state, &bus_name, None, &frame)?;
+            send_env_frame(state, &bus_name, &frame)?;
             Ok(ResponseData::CanSend {
                 bus: bus_name,
                 arb_id,
