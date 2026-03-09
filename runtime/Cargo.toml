@@ -2,6 +2,11 @@
 name = "agent-sim"
 version = "0.1.0"
 edition = "2024"
+description = "Agent-first firmware SIL testing"
+license = "MIT"
+readme = "../README.md"
+repository = "https://github.com/tomrford/agent-sim"
+categories = ["command-line-utilities", "simulation"]
 
 [dependencies]
 can-dbc = "8"
@@ -15,7 +20,15 @@ memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
