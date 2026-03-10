@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  runtime-cross-platform:
+    name: Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Runtime fmt
+        working-directory: runtime
+        run: cargo fmt --check
+
+      - name: Runtime clippy
+        working-directory: runtime
+        run: cargo clippy
+
+      - name: Runtime tests
+        working-directory: runtime
+        run: cargo test
+
+  full-gate-linux:
+    name: Full Gate (Linux + Nix)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Runtime gate
+        run: nix develop -c bash -c 'cd runtime && cargo fmt --check && cargo clippy && cargo test'
+
+      - name: Template gate
+        run: nix develop -c bash -c 'cd template && zig build && zig build test && zig fmt --check src/ build.zig project.zig'
+
+      - name: HVAC gate
+        run: nix develop -c bash -c 'cd examples/hvac && zig build && zig build test'
+
+      - name: Package build
+        run: nix build

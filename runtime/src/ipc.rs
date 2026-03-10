@@ -21,7 +21,7 @@ type ListenerInner = tokio::net::UnixListener;
 #[cfg(windows)]
 struct ListenerInner {
     pipe_name: String,
-    server: tokio::net::windows::named_pipe::NamedPipeServer,
+    server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
 }
 
 impl LocalListener {
@@ -35,14 +35,13 @@ impl LocalListener {
 
         #[cfg(windows)]
         {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
             let pipe_name = pipe_name(endpoint);
-            let server = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&pipe_name)?;
+            let server = create_server(&pipe_name, true)?;
             Ok(Self {
-                inner: ListenerInner { pipe_name, server },
+                inner: ListenerInner {
+                    pipe_name,
+                    server: Some(server),
+                },
             })
         }
     }
@@ -56,11 +55,18 @@ impl LocalListener {
 
         #[cfg(windows)]
         {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
-            self.inner.server.connect().await?;
-            let next_server = ServerOptions::new().create(&self.inner.pipe_name)?;
-            let connected = std::mem::replace(&mut self.inner.server, next_server);
+            let mut connected = match self.inner.server.take() {
+                Some(server) => server,
+                None => create_server(&self.inner.pipe_name, false)?,
+            };
+            connected.connect().await?;
+            match create_server(&self.inner.pipe_name, false) {
+                Ok(next_server) => self.inner.server = Some(next_server),
+                Err(err) => {
+                    self.inner.server = create_server(&self.inner.pipe_name, false).ok();
+                    return Err(err);
+                }
+            }
             Ok(Box::new(connected))
         }
     }
@@ -131,16 +137,42 @@ fn pipe_name(endpoint: &Path) -> String {
                 '_'
             }
         })
+        .take(WINDOWS_PIPE_STEM_MAX_LEN)
         .collect::<String>();
-    format!(r"\\.\pipe\agent-sim-{sanitized}-{suffix:016x}")
+    format!("{WINDOWS_PIPE_NAME_PREFIX}{sanitized}-{suffix:016x}")
 }
 
 #[cfg(windows)]
 const WINDOWS_PIPE_BUSY: i32 = 231;
 #[cfg(windows)]
+const WINDOWS_PIPE_NAME_PREFIX: &str = r"\\.\pipe\agent-sim-";
+#[cfg(windows)]
+const WINDOWS_PIPE_NAME_MAX_LEN: usize = 256;
+#[cfg(windows)]
+const WINDOWS_PIPE_HASH_SUFFIX_LEN: usize = 1 + 16;
+#[cfg(windows)]
+const WINDOWS_PIPE_STEM_MAX_LEN: usize =
+    WINDOWS_PIPE_NAME_MAX_LEN - WINDOWS_PIPE_NAME_PREFIX.len() - WINDOWS_PIPE_HASH_SUFFIX_LEN;
+#[cfg(windows)]
 const WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS: u32 = 10;
 #[cfg(windows)]
 const WINDOWS_PIPE_BUSY_RETRY_DELAY_MS: u64 = 50;
+
+#[cfg(windows)]
+fn create_server(
+    pipe_name: &str,
+    first_pipe_instance: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    if first_pipe_instance {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(pipe_name)
+    } else {
+        ServerOptions::new().create(pipe_name)
+    }
+}
 
 #[cfg(windows)]
 fn is_pipe_busy_error(err: &std::io::Error) -> bool {
@@ -164,7 +196,10 @@ fn stable_hash64(raw: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{is_pipe_busy_error, pipe_name, stable_hash64};
+    use super::{
+        WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, is_pipe_busy_error, pipe_name,
+        stable_hash64,
+    };
     #[cfg(windows)]
     use std::path::Path;
 
@@ -186,6 +221,19 @@ mod tests {
         assert_eq!(
             pipe_name(endpoint),
             r"\\.\pipe\agent-sim-demo-840f725602d6f670"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_name_stem_length_is_bounded() {
+        let long_stem = "a".repeat(WINDOWS_PIPE_STEM_MAX_LEN * 2);
+        let endpoint = format!(r"C:/Users/alice/.agent-sim/{long_stem}.sock");
+        let name = pipe_name(Path::new(&endpoint));
+        assert!(
+            name.len() <= WINDOWS_PIPE_NAME_MAX_LEN,
+            "pipe name too long: {}",
+            name.len()
         );
     }
 

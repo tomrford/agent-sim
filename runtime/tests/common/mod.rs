@@ -7,7 +7,8 @@ use uuid::Uuid;
 static FIXTURES_BUILT: Once = Once::new();
 
 pub fn unique_session(prefix: &str) -> String {
-    format!("{prefix}-{}", Uuid::new_v4())
+    let id = Uuid::new_v4().simple().to_string();
+    format!("{prefix}-{}", &id[..12])
 }
 
 pub fn repo_root() -> PathBuf {
