@@ -1,15 +1,19 @@
 use super::{EnvCanBusState, EnvState};
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
-use crate::daemon::lifecycle::{kill_pid, read_pid};
+use crate::daemon::lifecycle::{bootstrap_daemon_with_exe, kill_pid, read_pid};
 use crate::envd::spec::{EnvInstanceSpec, EnvSpec};
-use crate::load::write_load_spec;
 use crate::protocol::{CanBusData, InstanceAction, ResponseData, WorkerAction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 impl EnvState {
     pub(super) async fn bootstrap(socket_path: PathBuf, env_spec: EnvSpec) -> Result<Self, String> {
+        tracing::info!(
+            "bootstrapping env '{}' with {} instance(s)",
+            env_spec.name,
+            env_spec.instances.len()
+        );
         let mut started_instances = Vec::new();
         let result = Self::bootstrap_inner(socket_path, &env_spec, &mut started_instances).await;
         if result.is_err() {
@@ -23,6 +27,7 @@ impl EnvState {
         env_spec: &EnvSpec,
         started_instances: &mut Vec<String>,
     ) -> Result<Self, String> {
+        tracing::info!("env '{}' phase: bootstrap instances", env_spec.name);
         let mut tick_duration_us = None;
         let mut instance_can_buses: HashMap<String, Vec<CanBusData>> = HashMap::new();
         let mut bootstrap_tasks = tokio::task::JoinSet::new();
@@ -39,6 +44,7 @@ impl EnvState {
             started_instances.push(instance_name);
         }
 
+        tracing::info!("env '{}' phase: connect instance workers", env_spec.name);
         let mut instance_workers = HashMap::with_capacity(env_spec.instances.len());
         for instance in &env_spec.instances {
             instance_workers.insert(
@@ -47,6 +53,7 @@ impl EnvState {
             );
         }
 
+        tracing::info!("env '{}' phase: fetch instance info", env_spec.name);
         let mut pending_info = Vec::with_capacity(env_spec.instances.len());
         for instance in &env_spec.instances {
             let worker = instance_workers
@@ -81,6 +88,7 @@ impl EnvState {
             }
         }
 
+        tracing::info!("env '{}' phase: fetch worker can buses", env_spec.name);
         let mut pending_can_buses = Vec::with_capacity(env_spec.instances.len());
         for instance in &env_spec.instances {
             let worker = instance_workers
@@ -102,6 +110,7 @@ impl EnvState {
             instance_can_buses.insert(instance_name, buses);
         }
 
+        tracing::info!("env '{}' phase: build env can buses", env_spec.name);
         let mut can_buses = BTreeMap::new();
         let mut attached_members = HashSet::new();
         for bus_spec in &env_spec.can_buses {
@@ -160,6 +169,7 @@ impl EnvState {
             );
         }
 
+        tracing::info!("env '{}' phase: attach instance can buses", env_spec.name);
         for bus_spec in &env_spec.can_buses {
             for member in &bus_spec.members {
                 let worker = instance_workers.get(&member.instance_name).ok_or_else(|| {
@@ -186,10 +196,12 @@ impl EnvState {
             }
         }
 
+        tracing::info!("env '{}' phase: attach shared channels", env_spec.name);
         for shared in &env_spec.shared_channels {
             attach_shared_channel(&env_spec.name, shared).await?;
         }
 
+        tracing::info!("env '{}' phase: bootstrap complete", env_spec.name);
         Ok(Self {
             name: env_spec.name.clone(),
             socket_path,
@@ -269,25 +281,6 @@ async fn send_action_success(instance: &str, action: InstanceAction) -> Result<(
     }
 }
 
-async fn run_bootstrap_instance_command(
-    exe: &Path,
-    instance_name: &str,
-    spec_path: &Path,
-) -> Result<std::process::Output, String> {
-    tokio::process::Command::new(exe)
-        .arg("__internal")
-        .arg("bootstrap-instance")
-        .arg("--instance")
-        .arg(instance_name)
-        .arg("--load-spec-path")
-        .arg(spec_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|err| format!("failed to bootstrap instance '{instance_name}': {err}"))
-}
-
 async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     bootstrap_instance_detached_with_exe(instance, &exe).await
@@ -295,29 +288,11 @@ async fn bootstrap_instance_detached(instance: &EnvInstanceSpec) -> Result<(), S
 
 pub(super) async fn bootstrap_instance_detached_with_exe(
     instance: &EnvInstanceSpec,
-    exe: &Path,
+    exe: &std::path::Path,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(crate::daemon::lifecycle::bootstrap_dir())
-        .map_err(|err| format!("failed to create bootstrap dir: {err}"))?;
-    let spec_path = crate::daemon::lifecycle::bootstrap_dir().join(format!(
-        "{}-helper-{}.json",
-        instance.name,
-        uuid::Uuid::new_v4()
-    ));
-    write_load_spec(&spec_path, &instance.load_spec).map_err(|err| err.to_string())?;
-
-    let output = run_bootstrap_instance_command(exe, &instance.name, &spec_path).await;
-    let _ = std::fs::remove_file(&spec_path);
-    let output = output?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to bootstrap instance '{}': {}",
-            instance.name,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+    bootstrap_daemon_with_exe(&instance.name, &instance.load_spec, exe)
+        .await
+        .map_err(|err| format!("failed to bootstrap instance '{}': {err}", instance.name))
 }
 
 async fn rollback_instances(started_instances: &[String]) {

@@ -15,7 +15,7 @@ fn env_start_and_close_by_env_tag() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(
@@ -80,6 +80,7 @@ fn close_all_closes_running_env_daemons_too() {
     let session = unique_session("close-all-env");
     let env_name = unique_session("close-all-env");
     let libpath = template_lib_path().to_string_lossy().into_owned();
+    let libpath = libpath.replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(
@@ -124,7 +125,7 @@ fn env_start_rejects_unknown_session_fields() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(
@@ -199,7 +200,7 @@ fn env_start_cleans_up_instances_when_env_socket_bind_fails() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(

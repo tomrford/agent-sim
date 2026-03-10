@@ -42,3 +42,4 @@ tempfile = "3"
 
 [target."cfg(windows)".dependencies]
 peak-can-sys = "0.2.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

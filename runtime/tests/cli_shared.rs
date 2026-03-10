@@ -12,7 +12,7 @@ fn shared_list_reports_channels_from_loaded_project() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let _ = run_agent(&["--instance", &session, "load", &libpath]);
     let out = run_agent(&["--instance", &session, "shared", "list"]);
@@ -33,7 +33,7 @@ fn shared_get_reads_latest_snapshot_from_writer_session() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("shared env config should be creatable");
     write!(

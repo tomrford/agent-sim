@@ -54,7 +54,7 @@ fn env_time_controls_instances_but_allows_local_status_reads() {
     let instance_a = unique_session("env-time-a");
     let instance_b = unique_session("env-time-b");
     let env_name = unique_session("env-time");
-    let libpath = template_lib_path().to_string_lossy().into_owned();
+    let libpath = template_lib_path().to_string_lossy().replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(

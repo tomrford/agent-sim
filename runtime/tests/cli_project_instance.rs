@@ -37,12 +37,10 @@ fn load_info_and_reset_workflow() {
 #[test]
 fn load_invalid_library_path_returns_error() {
     let session = unique_session("project-invalid-path");
-    let err = run_agent_fail(&[
-        "--instance",
-        &session,
-        "load",
-        "/tmp/this-library-does-not-exist.so",
-    ]);
+    let missing = std::env::temp_dir().join("agent-sim-missing-lib");
+    let missing =
+        missing.with_extension(common::template_lib_path().extension().unwrap_or_default());
+    let err = run_agent_fail(&["--instance", &session, "load", &missing.to_string_lossy()]);
     assert!(
         err.contains("failed to resolve shared library path"),
         "expected load error for invalid library path, got: {err}"

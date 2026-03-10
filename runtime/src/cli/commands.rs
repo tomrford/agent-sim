@@ -277,12 +277,13 @@ mod tests {
 
     #[test]
     fn load_request_is_handled_by_cli_executor() {
+        let fake_lib = std::env::temp_dir().join("libsim-test");
         let args = CliArgs {
             json: false,
             instance: "default".to_string(),
             config: None,
             command: Some(Command::Load(LoadArgs {
-                libpath: Some("/tmp/libsim.dylib".to_string()),
+                libpath: Some(fake_lib.to_string_lossy().into_owned()),
                 flash: Vec::new(),
             })),
         };

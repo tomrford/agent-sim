@@ -315,8 +315,6 @@ async fn run_env_action(
 mod tests {
     use super::resolve_config_relative_path;
     use crate::cli::error::CliError;
-    use std::path::Path;
-
     #[test]
     fn resolve_config_relative_path_joins_relative_to_config_dir() {
         let temp = tempfile::tempdir().expect("tempdir should be creatable");
@@ -340,10 +338,11 @@ mod tests {
     fn resolve_config_relative_path_keeps_absolute_paths() {
         let temp = tempfile::tempdir().expect("tempdir should be creatable");
         let absolute = temp.path().join("internal.dbc");
+        let config_base = temp.path().join("unused");
         std::fs::write(&absolute, "VERSION \"\"").expect("dbc file should be writable");
         let resolved = resolve_config_relative_path(
             &absolute.to_string_lossy(),
-            Some(Path::new("/tmp/unused")),
+            Some(config_base.as_path()),
             "DBC",
         )
         .expect("absolute path should resolve");

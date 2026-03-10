@@ -1,10 +1,10 @@
 use crate::daemon::error::DaemonError;
+use crate::ipc;
 use crate::load::{LoadSpec, write_load_spec};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::net::UnixStream;
 use tokio::time::sleep;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,17 +52,43 @@ pub async fn bootstrap_daemon(session: &str, load_spec: &LoadSpec) -> Result<(),
     InstanceRegistry.bootstrap(session, load_spec).await
 }
 
+pub async fn bootstrap_daemon_with_exe(
+    session: &str,
+    load_spec: &LoadSpec,
+    exe: &Path,
+) -> Result<(), DaemonError> {
+    InstanceRegistry
+        .bootstrap_with_exe(session, load_spec, exe)
+        .await
+}
+
 impl InstanceRegistry {
     pub async fn ensure_running(self, session: &str) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
         let socket = socket_path(session);
-        if can_connect(&socket).await {
-            return Ok(());
+        let retry_delay = Duration::from_millis(50);
+        for attempt in 0..10 {
+            if can_connect(&socket).await {
+                return Ok(());
+            }
+            if attempt < 9 {
+                sleep(retry_delay).await;
+            }
         }
         Err(DaemonError::NotRunning(session.to_string()))
     }
 
     pub async fn bootstrap(self, session: &str, load_spec: &LoadSpec) -> Result<(), DaemonError> {
+        let exe = std::env::current_exe()?;
+        self.bootstrap_with_exe(session, load_spec, &exe).await
+    }
+
+    pub async fn bootstrap_with_exe(
+        self,
+        session: &str,
+        load_spec: &LoadSpec,
+        exe: &Path,
+    ) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
         std::fs::create_dir_all(bootstrap_dir())?;
         let socket = socket_path(session);
@@ -73,12 +99,18 @@ impl InstanceRegistry {
             bootstrap_dir().join(format!("{session}-{}.json", uuid::Uuid::new_v4()));
         write_load_spec(&bootstrap_path, load_spec)
             .map_err(|err| DaemonError::Request(err.to_string()))?;
-        let mut child = self.spawn_daemon(session, &bootstrap_path)?;
+        let mut child = match self.spawn_daemon_with_exe(exe, session, &bootstrap_path) {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = std::fs::remove_file(&bootstrap_path);
+                return Err(err);
+            }
+        };
 
         let timeout = Duration::from_secs(5);
         let mut waited = Duration::from_millis(0);
         while waited < timeout {
-            if can_connect(&socket).await {
+            if pid_path(session).exists() && can_connect(&socket).await {
                 let _ = std::fs::remove_file(&bootstrap_path);
                 return Ok(());
             }
@@ -110,12 +142,12 @@ impl InstanceRegistry {
         Err(DaemonError::StartupTimeout)
     }
 
-    fn spawn_daemon(
+    fn spawn_daemon_with_exe(
         self,
+        exe: &Path,
         session: &str,
         bootstrap_path: &Path,
     ) -> Result<std::process::Child, DaemonError> {
-        let exe = std::env::current_exe()?;
         let mut command = std::process::Command::new(exe);
         command
             .arg("__internal")
@@ -168,7 +200,7 @@ fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &P
 }
 
 async fn can_connect(socket: &Path) -> bool {
-    UnixStream::connect(socket).await.is_ok()
+    ipc::connect(socket).await.is_ok()
 }
 
 pub fn write_env_tag(session: &str, env: Option<&str>) -> Result<(), DaemonError> {
@@ -203,29 +235,15 @@ pub fn read_pid(session: &str) -> Option<u32> {
 }
 
 pub fn kill_pid(pid: u32) -> Result<(), DaemonError> {
-    #[cfg(unix)]
-    {
-        let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        if result != 0 {
-            return Err(DaemonError::Request(format!(
-                "failed to kill pid {pid}: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        Err(DaemonError::Request(
-            "pid kill fallback is not supported on this platform".to_string(),
-        ))
-    }
+    crate::process::kill_pid(pid)
+        .map_err(|err| DaemonError::Request(format!("failed to kill pid {pid}: {err}")))
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::cleanup_bootstrap_timeout;
+    #[cfg(unix)]
     use std::process::{Command, Stdio};
 
     #[cfg(unix)]
