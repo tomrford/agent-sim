@@ -60,8 +60,16 @@ impl LocalListener {
                 None => create_server(&self.inner.pipe_name, false)?,
             };
             connected.connect().await?;
-            let next_server = create_next_server(&self.inner.pipe_name)?;
-            self.inner.server = Some(next_server);
+            match create_next_server(&self.inner.pipe_name) {
+                Ok(next_server) => self.inner.server = Some(next_server),
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to rotate named-pipe listener for '{}': {}",
+                        self.inner.pipe_name,
+                        err
+                    );
+                }
+            }
             Ok(Box::new(connected))
         }
     }
