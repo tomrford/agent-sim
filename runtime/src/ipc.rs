@@ -2,6 +2,9 @@ use std::path::Path;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(not(any(unix, windows)))]
+compile_error!("ipc is only implemented for Unix and Windows targets");
+
 pub trait LocalStream: AsyncRead + AsyncWrite + Send + Unpin {}
 
 impl<T> LocalStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
@@ -71,9 +74,24 @@ pub async fn connect(endpoint: &Path) -> std::io::Result<BoxedLocalStream> {
 
     #[cfg(windows)]
     {
+        use std::time::Duration;
         use tokio::net::windows::named_pipe::ClientOptions;
+        use tokio::time::sleep;
 
-        Ok(Box::new(ClientOptions::new().open(pipe_name(endpoint))?))
+        let pipe_name = pipe_name(endpoint);
+        for attempt in 0..WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS {
+            match ClientOptions::new().open(&pipe_name) {
+                Ok(client) => return Ok(Box::new(client)),
+                Err(err)
+                    if is_pipe_busy_error(&err)
+                        && attempt + 1 < WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS =>
+                {
+                    sleep(Duration::from_millis(WINDOWS_PIPE_BUSY_RETRY_DELAY_MS)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("windows pipe retry loop should always return");
     }
 }
 
@@ -118,6 +136,18 @@ fn pipe_name(endpoint: &Path) -> String {
 }
 
 #[cfg(windows)]
+const WINDOWS_PIPE_BUSY: i32 = 231;
+#[cfg(windows)]
+const WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS: u32 = 10;
+#[cfg(windows)]
+const WINDOWS_PIPE_BUSY_RETRY_DELAY_MS: u64 = 50;
+
+#[cfg(windows)]
+fn is_pipe_busy_error(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(WINDOWS_PIPE_BUSY)
+}
+
+#[cfg(windows)]
 fn stable_hash64(raw: &str) -> u64 {
     // Use a fixed FNV-1a hash so pipe names remain stable across Rust upgrades.
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -134,7 +164,7 @@ fn stable_hash64(raw: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{pipe_name, stable_hash64};
+    use super::{is_pipe_busy_error, pipe_name, stable_hash64};
     #[cfg(windows)]
     use std::path::Path;
 
@@ -157,5 +187,12 @@ mod tests {
             pipe_name(endpoint),
             r"\\.\pipe\agent-sim-demo-840f725602d6f670"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_busy_detection_matches_windows_error_code() {
+        assert!(is_pipe_busy_error(&std::io::Error::from_raw_os_error(231)));
+        assert!(!is_pipe_busy_error(&std::io::Error::from_raw_os_error(5)));
     }
 }
