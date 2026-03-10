@@ -72,6 +72,8 @@ pub fn run_agent_fail_in_home(home: &Path, args: &[&str]) -> String {
 }
 
 fn run_agent_command(home: &Path, args: &[&str], expect_success: bool) -> (String, String) {
+    use std::sync::mpsc;
+
     let exe = resolve_agent_exe();
     let stdout_file = tempfile::NamedTempFile::new().expect("stdout temp file should be creatable");
     let stderr_file = tempfile::NamedTempFile::new().expect("stderr temp file should be creatable");
@@ -91,24 +93,34 @@ fn run_agent_command(home: &Path, args: &[&str], expect_success: bool) -> (Strin
         .spawn()
         .unwrap_or_else(|err| panic!("failed to spawn '{exe}' with args {args:?}: {err}"));
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .unwrap_or_else(|err| panic!("failed to poll child '{exe}' with args {args:?}: {err}"))
-        {
-            break status;
+    let wait_timeout = Duration::from_secs(15);
+    let pid = child.id();
+    let (wait_tx, wait_rx) = mpsc::channel();
+    let (wait_result, timed_out) = thread::scope(|scope| {
+        scope.spawn(move || {
+            let _ = wait_tx.send(child.wait());
+        });
+        match wait_rx.recv_timeout(wait_timeout) {
+            Ok(status) => (status, false),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = agent_sim::process::kill_pid(pid);
+                let status = wait_rx.recv().unwrap_or_else(|_| {
+                    panic!("wait thread disconnected for '{exe}' with args {args:?}")
+                });
+                (status, true)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("wait thread disconnected for '{exe}' with args {args:?}")
+            }
         }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!(
-                "command timed out after 15s: exe='{exe}' args={args:?} AGENT_SIM_HOME='{}'",
-                home.display()
-            );
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
+    });
+    let status = wait_result
+        .unwrap_or_else(|err| panic!("failed to wait child '{exe}' with args {args:?}: {err}"));
+    assert!(
+        !timed_out,
+        "command timed out after 15s: exe='{exe}' args={args:?} AGENT_SIM_HOME='{}'",
+        home.display()
+    );
 
     let stdout =
         std::fs::read_to_string(stdout_file.path()).expect("stdout temp file should be readable");

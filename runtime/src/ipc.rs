@@ -60,13 +60,8 @@ impl LocalListener {
                 None => create_server(&self.inner.pipe_name, false)?,
             };
             connected.connect().await?;
-            match create_server(&self.inner.pipe_name, false) {
-                Ok(next_server) => self.inner.server = Some(next_server),
-                Err(err) => {
-                    self.inner.server = create_server(&self.inner.pipe_name, false).ok();
-                    return Err(err);
-                }
-            }
+            let next_server = create_next_server(&self.inner.pipe_name)?;
+            self.inner.server = Some(next_server);
             Ok(Box::new(connected))
         }
     }
@@ -175,6 +170,32 @@ fn create_server(
 }
 
 #[cfg(windows)]
+fn create_next_server(
+    pipe_name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    match create_server(pipe_name, false) {
+        Ok(server) => Ok(server),
+        Err(primary_err) => match create_server(pipe_name, false) {
+            Ok(server) => Ok(server),
+            Err(recovery_err) => Err(create_next_server_error(primary_err, recovery_err)),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn create_next_server_error(
+    primary_err: std::io::Error,
+    recovery_err: std::io::Error,
+) -> std::io::Error {
+    std::io::Error::new(
+        primary_err.kind(),
+        format!(
+            "failed to rotate Windows named-pipe listener after accept; first create failed: {primary_err}; retry failed: {recovery_err}"
+        ),
+    )
+}
+
+#[cfg(windows)]
 fn is_pipe_busy_error(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(WINDOWS_PIPE_BUSY)
 }
@@ -197,8 +218,8 @@ fn stable_hash64(raw: &str) -> u64 {
 mod tests {
     #[cfg(windows)]
     use super::{
-        WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, is_pipe_busy_error, pipe_name,
-        stable_hash64,
+        WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, create_next_server_error,
+        is_pipe_busy_error, pipe_name, stable_hash64,
     };
     #[cfg(windows)]
     use std::path::Path;
@@ -242,5 +263,23 @@ mod tests {
     fn pipe_busy_detection_matches_windows_error_code() {
         assert!(is_pipe_busy_error(&std::io::Error::from_raw_os_error(231)));
         assert!(!is_pipe_busy_error(&std::io::Error::from_raw_os_error(5)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_next_server_error_reports_both_failures() {
+        let err = create_next_server_error(
+            std::io::Error::from_raw_os_error(8),
+            std::io::Error::from_raw_os_error(1450),
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("first create failed"),
+            "missing primary failure details: {message}"
+        );
+        assert!(
+            message.contains("retry failed"),
+            "missing recovery failure details: {message}"
+        );
     }
 }

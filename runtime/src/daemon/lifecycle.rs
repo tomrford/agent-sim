@@ -66,14 +66,8 @@ impl InstanceRegistry {
     pub async fn ensure_running(self, session: &str) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
         let socket = socket_path(session);
-        let retry_delay = Duration::from_millis(50);
-        for attempt in 0..10 {
-            if can_connect(&socket).await {
-                return Ok(());
-            }
-            if attempt < 9 {
-                sleep(retry_delay).await;
-            }
+        if can_connect(&socket).await {
+            return Ok(());
         }
         Err(DaemonError::NotRunning(session.to_string()))
     }

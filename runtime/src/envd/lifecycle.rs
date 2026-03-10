@@ -63,14 +63,8 @@ impl EnvRegistry {
     pub async fn ensure_running(self, env: &str) -> Result<(), EnvDaemonError> {
         std::fs::create_dir_all(env_root())?;
         let socket = socket_path(env);
-        let retry_delay = Duration::from_millis(50);
-        for attempt in 0..10 {
-            if can_connect(&socket).await {
-                return Ok(());
-            }
-            if attempt < 9 {
-                sleep(retry_delay).await;
-            }
+        if can_connect(&socket).await {
+            return Ok(());
         }
         Err(EnvDaemonError::NotRunning(env.to_string()))
     }
