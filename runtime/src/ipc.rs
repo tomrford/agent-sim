@@ -98,13 +98,8 @@ pub fn create_endpoint_marker(endpoint: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn pipe_name(endpoint: &Path) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let raw = endpoint.to_string_lossy();
-    let mut hasher = DefaultHasher::new();
-    raw.hash(&mut hasher);
-    let suffix = hasher.finish();
+    let suffix = stable_hash64(&raw);
     let stem = endpoint
         .file_stem()
         .and_then(|value| value.to_str())
@@ -120,4 +115,47 @@ fn pipe_name(endpoint: &Path) -> String {
         })
         .collect::<String>();
     format!(r"\\.\pipe\agent-sim-{sanitized}-{suffix:016x}")
+}
+
+#[cfg(windows)]
+fn stable_hash64(raw: &str) -> u64 {
+    // Use a fixed FNV-1a hash so pipe names remain stable across Rust upgrades.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in raw.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::{pipe_name, stable_hash64};
+    #[cfg(windows)]
+    use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_hash64_matches_known_fnv1a_values() {
+        assert_eq!(stable_hash64(""), 0xcbf29ce484222325);
+        assert_eq!(stable_hash64("agent-sim"), 0x529cc5bfe23c9fb0);
+        assert_eq!(
+            stable_hash64(r"C:/Users/alice/.agent-sim/demo.sock"),
+            0x840f725602d6f670
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_name_uses_stable_hash_suffix() {
+        let endpoint = Path::new(r"C:/Users/alice/.agent-sim/demo.sock");
+        assert_eq!(
+            pipe_name(endpoint),
+            r"\\.\pipe\agent-sim-demo-840f725602d6f670"
+        );
+    }
 }

@@ -104,7 +104,6 @@ Use the `template/` scaffold. Edit `src/adapter.zig` (logic + signals) and `proj
 
 - Human-oriented authoring guide: `docs/template-guide.md`
 - Agent-oriented build/test guide: `docs/agent-guide.md`
-- Windows runtime compatibility plan: `docs/windows-compat-plan.md`
 
 CAN transport notes:
 

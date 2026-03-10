@@ -634,88 +634,69 @@ mod tests {
         let mut listener =
             LocalListener::bind(&socket_path).expect("fake instance listener should bind");
         let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("fake instance should accept worker connection");
+            let (read_half, mut write_half) = split(stream);
+            let mut reader = BufReader::new(read_half);
             for expected_action in [
                 RequestAction::Instance(InstanceAction::Info),
                 RequestAction::Worker(WorkerAction::CanBuses),
             ] {
-                let request = loop {
-                    let mut stream = listener
-                        .accept()
-                        .await
-                        .expect("fake instance should accept worker connection");
-                    let mut line = String::new();
-                    let mut reader = BufReader::new(&mut stream);
-                    reader
-                        .read_line(&mut line)
-                        .await
-                        .expect("request should be readable");
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let request: Request =
-                        serde_json::from_str(line.trim_end()).expect("request json should parse");
-                    match (&request.action, &expected_action) {
-                        (
-                            RequestAction::Instance(InstanceAction::Info),
-                            RequestAction::Instance(InstanceAction::Info),
-                        ) => {
-                            let response = Response::ok(
-                                request.id,
-                                ResponseData::ProjectInfo {
-                                    libpath: "demo.dll".to_string(),
-                                    tick_duration_us: 20,
-                                    signal_count: 3,
-                                },
-                            );
-                            let mut payload = serde_json::to_string(&response)
-                                .expect("response should serialize");
-                            payload.push('\n');
-                            reader
-                                .get_mut()
-                                .write_all(payload.as_bytes())
-                                .await
-                                .expect("response should be writable");
-                            break request;
-                        }
-                        (
-                            RequestAction::Worker(WorkerAction::CanBuses),
-                            RequestAction::Worker(WorkerAction::CanBuses),
-                        ) => {
-                            let response = Response::ok(
-                                request.id,
-                                ResponseData::CanBuses {
-                                    buses: vec![crate::protocol::CanBusData {
-                                        id: 1,
-                                        name: "internal".to_string(),
-                                        bitrate: 500_000,
-                                        bitrate_data: 0,
-                                        fd_capable: false,
-                                        attached_iface: None,
-                                    }],
-                                },
-                            );
-                            let mut payload = serde_json::to_string(&response)
-                                .expect("response should serialize");
-                            payload.push('\n');
-                            reader
-                                .get_mut()
-                                .write_all(payload.as_bytes())
-                                .await
-                                .expect("response should be writable");
-                            break request;
-                        }
-                        other => panic!("unexpected request sequence: {other:?}"),
-                    }
-                };
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("request should be readable");
+                let request: Request =
+                    serde_json::from_str(line.trim_end()).expect("request json should parse");
                 match (&request.action, &expected_action) {
                     (
                         RequestAction::Instance(InstanceAction::Info),
                         RequestAction::Instance(InstanceAction::Info),
-                    ) => {}
+                    ) => {
+                        let response = Response::ok(
+                            request.id,
+                            ResponseData::ProjectInfo {
+                                libpath: "demo.dll".to_string(),
+                                tick_duration_us: 20,
+                                signal_count: 3,
+                            },
+                        );
+                        let mut payload =
+                            serde_json::to_string(&response).expect("response should serialize");
+                        payload.push('\n');
+                        write_half
+                            .write_all(payload.as_bytes())
+                            .await
+                            .expect("response should be writable");
+                    }
                     (
                         RequestAction::Worker(WorkerAction::CanBuses),
                         RequestAction::Worker(WorkerAction::CanBuses),
-                    ) => {}
+                    ) => {
+                        let response = Response::ok(
+                            request.id,
+                            ResponseData::CanBuses {
+                                buses: vec![crate::protocol::CanBusData {
+                                    id: 1,
+                                    name: "internal".to_string(),
+                                    bitrate: 500_000,
+                                    bitrate_data: 0,
+                                    fd_capable: false,
+                                    attached_iface: None,
+                                }],
+                            },
+                        );
+                        let mut payload =
+                            serde_json::to_string(&response).expect("response should serialize");
+                        payload.push('\n');
+                        write_half
+                            .write_all(payload.as_bytes())
+                            .await
+                            .expect("response should be writable");
+                    }
                     other => panic!("unexpected request sequence: {other:?}"),
                 }
             }

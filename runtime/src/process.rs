@@ -34,3 +34,6 @@ pub fn kill_pid(pid: u32) -> std::io::Result<()> {
         Ok(())
     }
 }
+
+#[cfg(not(any(unix, windows)))]
+compile_error!("process::kill_pid is only implemented for Unix and Windows targets");
