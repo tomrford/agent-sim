@@ -35,10 +35,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
 serial_test = "3"
 tempfile = "3"
 
 [target."cfg(windows)".dependencies]
 peak-can-sys = "0.2.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

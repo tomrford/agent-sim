@@ -12,7 +12,7 @@ fn recipe_level_session_default_targets_specified_session() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let _ = run_agent(&["--instance", &session_a, "load", &libpath]);
     let _ = run_agent(&["--instance", &session_b, "load", &libpath]);
@@ -66,7 +66,7 @@ fn recipe_session_preconditions_must_be_running() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let _ = run_agent(&["--instance", &session_a, "load", &libpath]);
 
@@ -108,7 +108,7 @@ fn recipe_env_whitelist_requires_target_session_env() {
     let libpath = libpath
         .to_str()
         .expect("template path should be valid utf8")
-        .to_string();
+        .replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("recipe config should be creatable");
     write!(

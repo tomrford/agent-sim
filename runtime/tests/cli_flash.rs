@@ -109,7 +109,7 @@ fn env_start_supports_device_flash_blocks() {
     let session = unique_session("flash-device");
     let env_name = unique_session("flash-env");
     let libpath = template_lib_path();
-    let libpath = libpath.to_string_lossy().into_owned();
+    let libpath = libpath.to_string_lossy().replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     std::io::Write::write_all(

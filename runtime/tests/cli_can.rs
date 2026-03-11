@@ -24,7 +24,7 @@ fn env_can_buses_reports_env_owned_topology() {
     ensure_fixtures_built();
     let session = unique_session("env-can");
     let env_name = unique_session("env-can");
-    let libpath = template_lib_path().to_string_lossy().into_owned();
+    let libpath = template_lib_path().to_string_lossy().replace('\\', "/");
 
     let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
     write!(

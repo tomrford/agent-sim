@@ -12,6 +12,7 @@ use crate::can::dbc::{DbcBusOverlay, frame_key_from_frame};
 use crate::daemon::lifecycle::{kill_pid, read_pid};
 use crate::envd::lifecycle::pid_path;
 use crate::envd::spec::EnvSpec;
+use crate::ipc::{self, BoxedLocalStream, LocalListener};
 use crate::protocol::{
     CanFrameData, InstanceAction, Request, RequestAction, Response, parse_duration_us,
 };
@@ -21,8 +22,7 @@ use crate::sim::types::CAN_FLAG_EXTENDED;
 use crate::sim::types::SimCanFrame;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 
@@ -67,9 +67,7 @@ struct ActionMessage {
 }
 
 pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(), std::io::Error> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    ipc::cleanup_endpoint(&socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -77,13 +75,17 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
     let state = EnvState::bootstrap(socket_path.clone(), env_spec)
         .await
         .map_err(std::io::Error::other)?;
-    let listener = match UnixListener::bind(&socket_path) {
+    let mut listener = match LocalListener::bind(&socket_path) {
         Ok(listener) => listener,
         Err(err) => {
             cleanup_listener_runtime(&state).await;
             return Err(err);
         }
     };
+    if let Err(err) = ipc::create_endpoint_marker(&socket_path) {
+        cleanup_listener_runtime(&state).await;
+        return Err(err);
+    }
     if let Err(err) = std::fs::write(pid_path(&state.name), std::process::id().to_string()) {
         cleanup_listener_runtime(&state).await;
         return Err(err);
@@ -105,7 +107,7 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
             }
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         let action_tx = action_tx.clone();
                         tokio::spawn(async move {
                             let _ = handle_connection(stream, action_tx).await;
@@ -132,10 +134,10 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: BoxedLocalStream,
     action_tx: mpsc::Sender<ActionMessage>,
 ) -> Result<(), std::io::Error> {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = split(stream);
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
 
@@ -326,9 +328,7 @@ fn locate_schedule_bus(state: &EnvState, job_id: &str) -> Result<String, String>
 
 async fn cleanup_listener_runtime(state: &EnvState) {
     shutdown_instances(state).await;
-    if state.socket_path.exists() {
-        let _ = std::fs::remove_file(&state.socket_path);
-    }
+    ipc::cleanup_endpoint(&state.socket_path);
     let pid = pid_path(&state.name);
     if pid.exists() {
         let _ = std::fs::remove_file(pid);
@@ -409,11 +409,11 @@ async fn shutdown_instances(state: &EnvState) {
 mod tests {
     use super::*;
     use crate::envd::spec::EnvInstanceSpec;
+    use crate::ipc::LocalListener;
     use crate::load::LoadSpec;
     use crate::protocol::{ResponseData, WorkerAction};
     use serial_test::serial;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
 
     fn frame(arb_id: u32, flags: u8, data: &[u8]) -> SimCanFrame {
         let mut payload = [0_u8; 64];
@@ -554,33 +554,40 @@ mod tests {
                 .expect("instance socket should have a parent directory"),
         )
         .expect("instance socket parent should be creatable");
-        let listener =
-            UnixListener::bind(&socket_path).expect("fake instance listener should bind");
+        let mut listener =
+            LocalListener::bind(&socket_path).expect("fake instance listener should bind");
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener
-                .accept()
-                .await
-                .expect("fake instance should accept worker-step request");
-            let mut line = String::new();
-            let mut reader = BufReader::new(&mut stream);
-            reader
-                .read_line(&mut line)
-                .await
-                .expect("request should be readable");
-            drop(reader);
-            let request: Request =
-                serde_json::from_str(line.trim_end()).expect("request json should parse");
-            assert!(matches!(
-                request.action,
-                RequestAction::Worker(WorkerAction::Step)
-            ));
-            let response = Response::ok(request.id, ResponseData::Ack);
-            let mut payload = serde_json::to_string(&response).expect("response should serialize");
-            payload.push('\n');
-            stream
-                .write_all(payload.as_bytes())
-                .await
-                .expect("response should be writable");
+            loop {
+                let mut stream = listener
+                    .accept()
+                    .await
+                    .expect("fake instance should accept worker-step request");
+                let mut line = String::new();
+                let mut reader = BufReader::new(&mut stream);
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("request should be readable");
+                if line.is_empty() {
+                    continue;
+                }
+                drop(reader);
+                let request: Request =
+                    serde_json::from_str(line.trim_end()).expect("request json should parse");
+                assert!(matches!(
+                    request.action,
+                    RequestAction::Worker(WorkerAction::Step)
+                ));
+                let response = Response::ok(request.id, ResponseData::Ack);
+                let mut payload =
+                    serde_json::to_string(&response).expect("response should serialize");
+                payload.push('\n');
+                stream
+                    .write_all(payload.as_bytes())
+                    .await
+                    .expect("response should be writable");
+                break;
+            }
         });
         let worker = instance_worker::InstanceWorker::connect(instance)
             .await
@@ -604,6 +611,126 @@ mod tests {
 
         assert_eq!(state.time.status(state.tick_duration_us).elapsed_ticks, 1);
 
+        restore_agent_sim_home(original_home);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn instance_worker_supports_multiple_requests_on_one_connection() {
+        let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
+        let original_home = std::env::var_os("AGENT_SIM_HOME");
+        unsafe {
+            std::env::set_var("AGENT_SIM_HOME", home.path());
+        }
+
+        let instance = "instance-a";
+        let socket_path = crate::daemon::lifecycle::socket_path(instance);
+        std::fs::create_dir_all(
+            socket_path
+                .parent()
+                .expect("instance socket should have a parent directory"),
+        )
+        .expect("instance socket parent should be creatable");
+        let mut listener =
+            LocalListener::bind(&socket_path).expect("fake instance listener should bind");
+        let server = tokio::spawn(async move {
+            let stream = listener
+                .accept()
+                .await
+                .expect("fake instance should accept worker connection");
+            let (read_half, mut write_half) = split(stream);
+            let mut reader = BufReader::new(read_half);
+            for expected_action in [
+                RequestAction::Instance(InstanceAction::Info),
+                RequestAction::Worker(WorkerAction::CanBuses),
+            ] {
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("request should be readable");
+                let request: Request =
+                    serde_json::from_str(line.trim_end()).expect("request json should parse");
+                match (&request.action, &expected_action) {
+                    (
+                        RequestAction::Instance(InstanceAction::Info),
+                        RequestAction::Instance(InstanceAction::Info),
+                    ) => {
+                        let response = Response::ok(
+                            request.id,
+                            ResponseData::ProjectInfo {
+                                libpath: "demo.dll".to_string(),
+                                tick_duration_us: 20,
+                                signal_count: 3,
+                            },
+                        );
+                        let mut payload =
+                            serde_json::to_string(&response).expect("response should serialize");
+                        payload.push('\n');
+                        write_half
+                            .write_all(payload.as_bytes())
+                            .await
+                            .expect("response should be writable");
+                    }
+                    (
+                        RequestAction::Worker(WorkerAction::CanBuses),
+                        RequestAction::Worker(WorkerAction::CanBuses),
+                    ) => {
+                        let response = Response::ok(
+                            request.id,
+                            ResponseData::CanBuses {
+                                buses: vec![crate::protocol::CanBusData {
+                                    id: 1,
+                                    name: "internal".to_string(),
+                                    bitrate: 500_000,
+                                    bitrate_data: 0,
+                                    fd_capable: false,
+                                    attached_iface: None,
+                                }],
+                            },
+                        );
+                        let mut payload =
+                            serde_json::to_string(&response).expect("response should serialize");
+                        payload.push('\n');
+                        write_half
+                            .write_all(payload.as_bytes())
+                            .await
+                            .expect("response should be writable");
+                    }
+                    other => panic!("unexpected request sequence: {other:?}"),
+                }
+            }
+        });
+
+        let worker = instance_worker::InstanceWorker::connect(instance)
+            .await
+            .expect("test worker should connect to fake instance");
+
+        let info_rx = worker
+            .begin_instance_request(InstanceAction::Info)
+            .await
+            .expect("info request should queue");
+        let info = info_rx.await.expect("info response should arrive");
+        assert!(matches!(
+            info,
+            Ok(ResponseData::ProjectInfo {
+                tick_duration_us: 20,
+                signal_count: 3,
+                ..
+            })
+        ));
+
+        let buses_rx = worker
+            .begin_worker_request(WorkerAction::CanBuses)
+            .await
+            .expect("can buses request should queue");
+        let buses = buses_rx.await.expect("can buses response should arrive");
+        assert!(matches!(
+            buses,
+            Ok(ResponseData::CanBuses { buses }) if buses.len() == 1 && buses[0].name == "internal"
+        ));
+
+        server.await.expect("fake instance task should finish");
         restore_agent_sim_home(original_home);
     }
 

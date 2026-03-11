@@ -9,6 +9,7 @@ mod tick_ops;
 
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
+use crate::ipc::{self, BoxedLocalStream, LocalListener};
 use crate::protocol::{Request, RequestAction, Response};
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
@@ -18,8 +19,7 @@ use crate::sim::types::{SignalType, SignalValue, SimCanBusDesc, SimCanFrame, Sim
 use globset::{Glob, GlobMatcher};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub struct DaemonState {
@@ -154,13 +154,12 @@ pub async fn run_listener(
     project: Project,
     env: Option<String>,
 ) -> Result<(), std::io::Error> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    ipc::cleanup_endpoint(&socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let listener = UnixListener::bind(&socket_path)?;
+    let mut listener = LocalListener::bind(&socket_path)?;
+    ipc::create_endpoint_marker(&socket_path)?;
     let pid_path = crate::daemon::lifecycle::pid_path(&session);
     std::fs::write(&pid_path, std::process::id().to_string())?;
     crate::daemon::lifecycle::write_env_tag(&session, env.as_deref())
@@ -184,7 +183,7 @@ pub async fn run_listener(
             }
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _addr)) => {
+                    Ok(stream) => {
                         let action_tx = action_tx.clone();
                         tokio::spawn(async move {
                             let _ = handle_connection(stream, action_tx).await;
@@ -202,9 +201,7 @@ pub async fn run_listener(
     drop(action_tx);
     let _ = tick_task.await;
 
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    ipc::cleanup_endpoint(&socket_path);
     if pid_path.exists() {
         let _ = std::fs::remove_file(pid_path);
     }
@@ -217,10 +214,10 @@ pub async fn run_listener(
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: BoxedLocalStream,
     action_tx: mpsc::Sender<ActionMessage>,
 ) -> Result<(), std::io::Error> {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = split(stream);
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
 

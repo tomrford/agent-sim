@@ -13,12 +13,21 @@ use peak_can_sys::{
     TPEAKMsg, TPEAKMsgFD, TPEAKTimestamp, WORD,
 };
 
-#[derive(Debug)]
 pub(crate) struct PlatformCanSocket {
     iface: String,
     channel: WORD,
     pcan: Pcan,
     fd_capable: bool,
+}
+
+impl std::fmt::Debug for PlatformCanSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformCanSocket")
+            .field("iface", &self.iface)
+            .field("channel", &self.channel)
+            .field("fd_capable", &self.fd_capable)
+            .finish()
+    }
 }
 
 impl PlatformCanSocket {

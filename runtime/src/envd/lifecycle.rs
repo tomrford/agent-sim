@@ -1,11 +1,11 @@
 use crate::daemon::lifecycle::session_root;
 use crate::envd::error::EnvDaemonError;
 use crate::envd::spec::{EnvSpec, write_env_spec};
+use crate::ipc;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::net::UnixStream;
 use tokio::time::sleep;
 
 pub fn env_root() -> PathBuf {
@@ -85,7 +85,7 @@ impl EnvRegistry {
         let timeout = Duration::from_secs(5);
         let mut waited = Duration::ZERO;
         while waited < timeout {
-            if can_connect(&socket).await {
+            if pid_path(&env_spec.name).exists() && can_connect(&socket).await {
                 let _ = std::fs::remove_file(&bootstrap_path);
                 return Ok(());
             }
@@ -142,12 +142,14 @@ fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &P
 }
 
 async fn can_connect(socket: &Path) -> bool {
-    UnixStream::connect(socket).await.is_ok()
+    ipc::connect(socket).await.is_ok()
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::cleanup_bootstrap_timeout;
+    #[cfg(unix)]
     use std::process::{Command, Stdio};
 
     #[cfg(unix)]

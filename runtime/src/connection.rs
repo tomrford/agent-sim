@@ -2,10 +2,10 @@ use crate::daemon::error::DaemonError;
 use crate::daemon::lifecycle::{bootstrap_daemon, ensure_daemon_running, socket_path};
 use crate::envd::error::EnvDaemonError;
 use crate::envd::lifecycle::{ensure_env_running, socket_path as env_socket_path};
+use crate::ipc;
 use crate::protocol::{InstanceAction, Request, RequestAction, Response};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::time::{Duration, sleep, timeout};
 
 #[derive(Debug, Error)]
@@ -27,14 +27,14 @@ pub enum ConnectionError {
 pub async fn send_request(session: &str, request: &Request) -> Result<Response, ConnectionError> {
     SessionConnector.prepare(session, request).await?;
     RequestTransport::default()
-        .send_to_socket(&socket_path(session), request)
+        .send_to_endpoint(&socket_path(session), request)
         .await
 }
 
 pub async fn send_env_request(env: &str, request: &Request) -> Result<Response, ConnectionError> {
     EnvConnector.prepare(env).await?;
     RequestTransport::default()
-        .send_to_socket(&env_socket_path(env), request)
+        .send_to_endpoint(&env_socket_path(env), request)
         .await
 }
 
@@ -60,9 +60,9 @@ impl Default for RequestTransport {
 }
 
 impl RequestTransport {
-    async fn send_to_socket(
+    async fn send_to_endpoint(
         self,
-        socket: &std::path::Path,
+        endpoint: &std::path::Path,
         request: &Request,
     ) -> Result<Response, ConnectionError> {
         let payload = {
@@ -73,7 +73,7 @@ impl RequestTransport {
 
         let mut attempt = 0_u32;
         loop {
-            match self.send_once(socket, &payload).await {
+            match self.send_once(endpoint, &payload).await {
                 Ok(response) => return Ok(response),
                 Err(err) => {
                     attempt += 1;
@@ -88,10 +88,10 @@ impl RequestTransport {
 
     async fn send_once(
         self,
-        socket: &std::path::Path,
+        endpoint: &std::path::Path,
         payload: &str,
     ) -> Result<Response, ConnectionError> {
-        let mut stream = timeout(self.connect_timeout, UnixStream::connect(socket))
+        let mut stream = timeout(self.connect_timeout, ipc::connect(endpoint))
             .await
             .map_err(|_| ConnectionError::Timeout)??;
         timeout(self.write_timeout, stream.write_all(payload.as_bytes()))

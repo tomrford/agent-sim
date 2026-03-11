@@ -1,10 +1,9 @@
 use crate::daemon::lifecycle::socket_path;
+use crate::ipc::{self, BoxedLocalStream};
 use crate::protocol::{
     InstanceAction, Request, RequestAction, Response, ResponseData, WorkerAction,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf, split};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -21,7 +20,7 @@ pub(super) struct InstanceWorker {
 
 impl InstanceWorker {
     pub(super) async fn connect(instance_name: &str) -> Result<Self, String> {
-        let stream = UnixStream::connect(socket_path(instance_name))
+        let stream = ipc::connect(&socket_path(instance_name))
             .await
             .map_err(|err| {
                 format!(
@@ -29,7 +28,7 @@ impl InstanceWorker {
                     instance_name
                 )
             })?;
-        let (read_half, write_half) = stream.into_split();
+        let (read_half, write_half) = split(stream);
         let (request_tx, request_rx) = mpsc::channel(64);
         tokio::spawn(run_worker(
             instance_name.to_string(),
@@ -72,8 +71,8 @@ impl InstanceWorker {
 
 async fn run_worker(
     instance_name: String,
-    read_half: OwnedReadHalf,
-    mut write_half: OwnedWriteHalf,
+    read_half: ReadHalf<BoxedLocalStream>,
+    mut write_half: WriteHalf<BoxedLocalStream>,
     mut request_rx: mpsc::Receiver<InstanceWorkerMessage>,
 ) {
     let mut reader = BufReader::new(read_half);
@@ -102,8 +101,8 @@ async fn run_worker(
 
 async fn send_request(
     instance_name: &str,
-    reader: &mut BufReader<OwnedReadHalf>,
-    write_half: &mut OwnedWriteHalf,
+    reader: &mut BufReader<ReadHalf<BoxedLocalStream>>,
+    write_half: &mut WriteHalf<BoxedLocalStream>,
     request: &Request,
     line: &mut String,
 ) -> Result<ResponseData, String> {
