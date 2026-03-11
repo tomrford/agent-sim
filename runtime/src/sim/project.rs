@@ -37,6 +37,19 @@ const STATUS_NOT_INITIALIZED: u32 = 1;
 const STATUS_INVALID_SIGNAL: u32 = 3;
 const STATUS_TYPE_MISMATCH: u32 = 4;
 const STATUS_BUFFER_TOO_SMALL: u32 = 5;
+
+fn validate_tick_duration_us(
+    tick_duration_us: u32,
+    source: &str,
+) -> Result<u32, crate::sim::error::ProjectError> {
+    if tick_duration_us == 0 {
+        return Err(crate::sim::error::ProjectError::LibraryLoad(format!(
+            "{source} returned invalid zero tick duration"
+        )));
+    }
+    Ok(tick_duration_us)
+}
+
 const SUPPORTED_API_VERSION_MAJOR: u32 = 2;
 const SUPPORTED_API_VERSION_MINOR: u32 = 0;
 
@@ -151,7 +164,7 @@ impl Project {
                     "sim_get_tick_duration_us failed with status {status}"
                 )));
             }
-            value
+            validate_tick_duration_us(value, "sim_get_tick_duration_us")?
         };
 
         let signals = {
@@ -657,4 +670,28 @@ fn validate_dense_shared_snapshot(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_tick_duration_us;
+    use crate::sim::error::ProjectError;
+
+    #[test]
+    fn validate_tick_duration_rejects_zero() {
+        let err = validate_tick_duration_us(0, "sim_get_tick_duration_us")
+            .expect_err("zero tick duration must fail");
+        assert!(
+            matches!(err, ProjectError::LibraryLoad(message) if message.contains("invalid zero tick duration"))
+        );
+    }
+
+    #[test]
+    fn validate_tick_duration_accepts_positive_value() {
+        assert_eq!(
+            validate_tick_duration_us(20, "sim_get_tick_duration_us")
+                .expect("positive tick duration must pass"),
+            20
+        );
+    }
 }

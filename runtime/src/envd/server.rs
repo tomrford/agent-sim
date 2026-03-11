@@ -238,7 +238,10 @@ fn duration_to_env_ticks(tick_duration_us: u32, raw: &str) -> Result<u64, String
     if duration_us == 0 {
         return Err("schedule period must be greater than zero".to_string());
     }
-    let tick = u64::from(tick_duration_us.max(1));
+    if tick_duration_us == 0 {
+        return Err("env tick duration must be greater than zero".to_string());
+    }
+    let tick = u64::from(tick_duration_us);
     Ok(duration_us.div_ceil(tick))
 }
 
@@ -273,7 +276,6 @@ fn parse_env_frame(
 }
 
 fn send_env_frame(state: &mut EnvState, bus_name: &str, frame: &SimCanFrame) -> Result<(), String> {
-    validate_env_frame(state, bus_name, frame)?;
     let bus = state
         .can_buses
         .get_mut(bus_name)
@@ -612,6 +614,12 @@ mod tests {
         assert_eq!(state.time.status(state.tick_duration_us).elapsed_ticks, 1);
 
         restore_agent_sim_home(original_home);
+    }
+
+    #[test]
+    fn duration_to_env_ticks_rejects_zero_tick_duration() {
+        let err = duration_to_env_ticks(0, "10ms").expect_err("zero tick duration must fail");
+        assert!(err.contains("must be greater than zero"));
     }
 
     #[tokio::test(flavor = "current_thread")]

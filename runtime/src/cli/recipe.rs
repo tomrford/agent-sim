@@ -12,7 +12,7 @@ use crate::protocol::{
     ResponseData, SignalValueData,
 };
 use crate::sim::types::SignalValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::ExitCode;
 use tokio::time::{Duration, sleep};
@@ -284,6 +284,11 @@ async fn execute_recipe_ops(
     ops: &[RecipeOp],
     dry_run: bool,
 ) -> Result<Vec<RecipeStepResultData>, CliError> {
+    let attached_envs = if dry_run {
+        HashMap::new()
+    } else {
+        load_attached_envs().await?
+    };
     let mut results = Vec::with_capacity(ops.len());
     for op in ops {
         match op {
@@ -318,7 +323,7 @@ async fn execute_recipe_ops(
             RecipeOp::Step { instance, duration } => {
                 let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    if let Some(env_name) = attached_env_name(&instance_name).await? {
+                    if let Some(env_name) = attached_envs.get(&instance_name).cloned().flatten() {
                         send_env_action_success(
                             &env_name,
                             EnvAction::TimeStep {
@@ -363,7 +368,7 @@ async fn execute_recipe_ops(
             RecipeOp::Speed { instance, speed } => {
                 let instance_name = resolve_instance(default_instance, instance);
                 if !dry_run {
-                    if let Some(env_name) = attached_env_name(&instance_name).await? {
+                    if let Some(env_name) = attached_envs.get(&instance_name).cloned().flatten() {
                         send_env_action_success(
                             &env_name,
                             EnvAction::TimeSpeed {
@@ -484,14 +489,21 @@ fn resolve_instance(default_instance: &str, instance: &Option<String>) -> String
     instance.as_deref().unwrap_or(default_instance).to_string()
 }
 
-async fn attached_env_name(instance: &str) -> Result<Option<String>, CliError> {
+async fn load_attached_envs() -> Result<HashMap<String, Option<String>>, CliError> {
     let running = lifecycle::list_instances()
         .await
         .map_err(|err| CliError::CommandFailed(err.to_string()))?;
-    Ok(running
+    Ok(attached_env_map(running))
+}
+
+fn attached_env_map(
+    running: Vec<crate::daemon::lifecycle::InstanceRuntimeInfo>,
+) -> HashMap<String, Option<String>> {
+    running
         .into_iter()
-        .find(|running_instance| running_instance.name == instance && running_instance.running)
-        .and_then(|running_instance| running_instance.env))
+        .filter(|running_instance| running_instance.running)
+        .map(|running_instance| (running_instance.name, running_instance.env))
+        .collect()
 }
 
 async fn send_env_action_success(env: &str, action: EnvAction) -> Result<(), CliError> {
@@ -647,9 +659,11 @@ fn signal_value_as_f64(value: &SignalValue) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecipeOp, compare_eq, compile_for_step, validate_assert_spec};
+    use super::{RecipeOp, attached_env_map, compare_eq, compile_for_step, validate_assert_spec};
     use crate::config::recipe::{AssertSpec, ForSpec};
+    use crate::daemon::lifecycle::InstanceRuntimeInfo;
     use crate::sim::types::SignalValue;
+    use std::path::PathBuf;
 
     #[test]
     fn compile_for_step_uses_stable_iteration_count_for_fractional_steps() {
@@ -737,5 +751,33 @@ mod tests {
         let expected = toml::Value::Float(0.2_f64);
         let equal = compare_eq(&actual, &expected).expect("f32 eq comparison should succeed");
         assert!(!equal, "0.1_f32 should not equal TOML float literal 0.2");
+    }
+
+    #[test]
+    fn attached_env_map_keeps_only_running_instances() {
+        let envs = attached_env_map(vec![
+            InstanceRuntimeInfo {
+                name: "alpha".to_string(),
+                socket_path: PathBuf::from("/tmp/alpha.sock"),
+                running: true,
+                env: Some("lab".to_string()),
+            },
+            InstanceRuntimeInfo {
+                name: "beta".to_string(),
+                socket_path: PathBuf::from("/tmp/beta.sock"),
+                running: false,
+                env: Some("stale".to_string()),
+            },
+            InstanceRuntimeInfo {
+                name: "gamma".to_string(),
+                socket_path: PathBuf::from("/tmp/gamma.sock"),
+                running: true,
+                env: None,
+            },
+        ]);
+
+        assert_eq!(envs.get("alpha"), Some(&Some("lab".to_string())));
+        assert_eq!(envs.get("gamma"), Some(&None));
+        assert!(!envs.contains_key("beta"));
     }
 }
