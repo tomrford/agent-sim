@@ -7,6 +7,18 @@ use crate::protocol::{CanBusData, InstanceAction, ResponseData, WorkerAction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+fn validate_env_tick_duration_us(
+    instance_name: &str,
+    tick_duration_us: u32,
+) -> Result<u32, String> {
+    if tick_duration_us == 0 {
+        return Err(format!(
+            "instance '{instance_name}' reports invalid zero tick duration"
+        ));
+    }
+    Ok(tick_duration_us)
+}
+
 impl EnvState {
     pub(super) async fn bootstrap(socket_path: PathBuf, env_spec: EnvSpec) -> Result<Self, String> {
         tracing::info!(
@@ -76,6 +88,7 @@ impl EnvState {
                     instance_name
                 ));
             };
+            let instance_tick_us = validate_env_tick_duration_us(&instance_name, instance_tick_us)?;
             match tick_duration_us {
                 Some(expected) if expected != instance_tick_us => {
                     return Err(format!(
@@ -201,11 +214,18 @@ impl EnvState {
             attach_shared_channel(&env_spec.name, shared).await?;
         }
 
+        let tick_duration_us = tick_duration_us.ok_or_else(|| {
+            format!(
+                "env '{}' must define at least one instance with a valid tick duration",
+                env_spec.name
+            )
+        })?;
+
         tracing::info!("env '{}' phase: bootstrap complete", env_spec.name);
         Ok(Self {
             name: env_spec.name.clone(),
             socket_path,
-            tick_duration_us: tick_duration_us.unwrap_or(1),
+            tick_duration_us,
             instances: env_spec
                 .instances
                 .iter()
@@ -216,6 +236,25 @@ impl EnvState {
             can_buses,
             shutdown: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_env_tick_duration_us;
+
+    #[test]
+    fn validate_env_tick_duration_rejects_zero() {
+        let err = validate_env_tick_duration_us("demo", 0).expect_err("zero tick must fail");
+        assert!(err.contains("invalid zero tick duration"));
+    }
+
+    #[test]
+    fn validate_env_tick_duration_accepts_positive_value() {
+        assert_eq!(
+            validate_env_tick_duration_us("demo", 50).expect("positive tick must pass"),
+            50
+        );
     }
 }
 
