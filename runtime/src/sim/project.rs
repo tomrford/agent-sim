@@ -49,6 +49,7 @@ fn validate_tick_duration_us(
     }
     Ok(tick_duration_us)
 }
+
 const SUPPORTED_API_VERSION_MAJOR: u32 = 2;
 const SUPPORTED_API_VERSION_MINOR: u32 = 0;
 

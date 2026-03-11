@@ -109,7 +109,7 @@ impl RequestTransport {
         let shift = attempt.saturating_sub(1).min(3);
         self.retry_delay_base
             .checked_mul(1_u32 << shift)
-            .unwrap_or(self.retry_delay_base)
+            .unwrap_or(Duration::MAX)
     }
 
     async fn send_once(
@@ -208,5 +208,14 @@ mod tests {
             transport.retry_delay_for_attempt(5),
             Duration::from_millis(800)
         );
+    }
+
+    #[test]
+    fn request_transport_caps_retry_delay_on_overflow() {
+        let transport = RequestTransport {
+            retry_delay_base: Duration::MAX,
+            ..RequestTransport::default()
+        };
+        assert_eq!(transport.retry_delay_for_attempt(4), Duration::MAX);
     }
 }
