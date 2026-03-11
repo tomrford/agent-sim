@@ -55,7 +55,7 @@ impl LocalListener {
 
         #[cfg(windows)]
         {
-            let mut connected = match self.inner.server.take() {
+            let connected = match self.inner.server.take() {
                 Some(server) => server,
                 None => create_server(&self.inner.pipe_name, false)?,
             };

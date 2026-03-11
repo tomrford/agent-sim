@@ -222,6 +222,15 @@ pub fn remove_env_tag(session: &str) {
     }
 }
 
+pub fn cleanup_runtime_artifacts(session: &str) {
+    ipc::cleanup_endpoint(&socket_path(session));
+    let pid = pid_path(session);
+    if pid.exists() {
+        let _ = std::fs::remove_file(pid);
+    }
+    remove_env_tag(session);
+}
+
 pub fn read_pid(session: &str) -> Option<u32> {
     std::fs::read_to_string(pid_path(session))
         .ok()

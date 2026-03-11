@@ -42,6 +42,7 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
         Command::Watch(watch) => run_watch_command(&args, watch).await,
         Command::Run(run) => recipe::run_recipe_command(&args, run).await,
         Command::Close(close) if close.all || close.env.is_some() => run_close_command(close).await,
+        Command::Close(_) => run_instance_close_command(&args.instance).await,
         Command::Env(env) => env::run_env_command(&args, env).await,
         _ => {
             let request = to_request(&args)?;
@@ -53,6 +54,25 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
                 Ok(ExitCode::SUCCESS)
             } else {
                 Ok(ExitCode::from(1))
+            }
+        }
+    }
+}
+
+async fn run_instance_close_command(session: &str) -> Result<ExitCode, CliError> {
+    if lifecycle::ensure_daemon_running(session).await.is_err() {
+        lifecycle::cleanup_runtime_artifacts(session);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    match send_action_success(session, InstanceAction::Close).await {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(err) => {
+            if lifecycle::ensure_daemon_running(session).await.is_err() {
+                lifecycle::cleanup_runtime_artifacts(session);
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Err(err)
             }
         }
     }

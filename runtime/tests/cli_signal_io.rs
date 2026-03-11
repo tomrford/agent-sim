@@ -1,9 +1,12 @@
 mod common;
 
+use agent_sim::daemon::lifecycle;
 use common::{
     ensure_fixtures_built, hvac_lib_path, run_agent, run_agent_fail, template_lib_path,
     unique_session,
 };
+use std::thread;
+use std::time::Duration;
 
 #[test]
 fn set_step_get_template_signals() {
@@ -148,6 +151,35 @@ fn wildcard_and_id_selectors_work() {
     assert!(
         missing.contains("signal not found: '#999'"),
         "expected missing id error, got: {missing}"
+    );
+
+    let _ = run_agent(&["--instance", &session, "close"]);
+}
+
+#[test]
+fn close_is_idempotent_after_shutdown() {
+    ensure_fixtures_built();
+    let session = unique_session("signal-io-close");
+    let libpath = template_lib_path();
+    let libpath = libpath
+        .to_str()
+        .expect("template path should be valid utf8")
+        .to_string();
+
+    let _ = run_agent(&["--instance", &session, "load", &libpath]);
+    let _ = run_agent(&["--instance", &session, "close"]);
+
+    let socket_path = lifecycle::socket_path(&session);
+    for _ in 0..50 {
+        if !socket_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !socket_path.exists(),
+        "instance socket should be removed after close: {}",
+        socket_path.display()
     );
 
     let _ = run_agent(&["--instance", &session, "close"]);
