@@ -103,7 +103,11 @@ fn run_agent_command(home: &Path, args: &[&str], expect_success: bool) -> (Strin
         match wait_rx.recv_timeout(wait_timeout) {
             Ok(status) => (status, false),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = agent_sim::process::kill_pid(pid);
+                if let Err(err) = agent_sim::process::kill_pid(pid) {
+                    panic!(
+                        "timed out and failed to kill child '{exe}' (pid {pid}) with args {args:?}: {err}"
+                    );
+                }
                 let status = wait_rx.recv().unwrap_or_else(|_| {
                     panic!("wait thread disconnected for '{exe}' with args {args:?}")
                 });
