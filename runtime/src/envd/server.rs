@@ -276,7 +276,6 @@ fn parse_env_frame(
 }
 
 fn send_env_frame(state: &mut EnvState, bus_name: &str, frame: &SimCanFrame) -> Result<(), String> {
-    validate_env_frame(state, bus_name, frame)?;
     let bus = state
         .can_buses
         .get_mut(bus_name)
