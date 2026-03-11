@@ -1,6 +1,9 @@
 mod common;
 
-use common::{ensure_fixtures_built, run_agent, run_agent_fail, template_lib_path, unique_session};
+use common::{
+    ensure_fixtures_built, run_agent, run_agent_capture_in_home, run_agent_fail, template_lib_path,
+    unique_session,
+};
 use serial_test::serial;
 use std::io::Write;
 
@@ -245,4 +248,69 @@ instances = [
             .exists(),
         "env pid should not be left behind after bind failure"
     );
+}
+
+#[test]
+#[serial]
+fn concurrent_env_start_keeps_env_reachable() {
+    ensure_fixtures_built();
+    let home = tempfile::tempdir().expect("temp home should be creatable");
+    let session = unique_session("env-concurrent");
+    let env_name = unique_session("cluster-concurrent");
+    let libpath = template_lib_path()
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_string();
+
+    let mut cfg = tempfile::NamedTempFile::new().expect("env config should be creatable");
+    write!(
+        cfg,
+        r#"
+[env.{env_name}]
+instances = [
+  {{ name = "{session}", lib = "{libpath}" }},
+]
+"#
+    )
+    .expect("env config should be writable");
+    let cfg_path = cfg.path().display().to_string();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run_agent_capture_in_home(
+                home.path(),
+                &["--config", &cfg_path, "env", "start", &env_name],
+            )
+        });
+        let second = scope.spawn(|| {
+            run_agent_capture_in_home(
+                home.path(),
+                &["--config", &cfg_path, "env", "start", &env_name],
+            )
+        });
+        (
+            first.join().expect("first env-start thread should join"),
+            second.join().expect("second env-start thread should join"),
+        )
+    });
+
+    let successes = [first.0, second.0]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1, "expected exactly one successful env start");
+    let combined_stderr = format!("{}\n{}", first.2, second.2);
+    assert!(
+        combined_stderr.contains("already has a running daemon"),
+        "expected duplicate env start rejection, got: {combined_stderr}"
+    );
+
+    let status = run_agent_capture_in_home(home.path(), &["env", "status", &env_name]);
+    assert!(
+        status.0,
+        "env should remain reachable after concurrent start"
+    );
+
+    let close = run_agent_capture_in_home(home.path(), &["close", "--env", &env_name]);
+    assert!(close.0, "env close should succeed after concurrent start");
 }

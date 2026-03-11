@@ -2,6 +2,7 @@ use crate::daemon::lifecycle::session_root;
 use crate::envd::error::EnvDaemonError;
 use crate::envd::spec::{EnvSpec, write_env_spec};
 use crate::ipc;
+use crate::process::StartupLock;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,6 +19,10 @@ pub fn bootstrap_dir() -> PathBuf {
 
 pub fn socket_path(env: &str) -> PathBuf {
     env_root().join(format!("{env}.sock"))
+}
+
+fn startup_lock_path(env: &str) -> PathBuf {
+    env_root().join("locks").join(format!("{env}.env.lock"))
 }
 
 pub fn pid_path(env: &str) -> PathBuf {
@@ -72,6 +77,9 @@ impl EnvRegistry {
     pub async fn bootstrap(self, env_spec: &EnvSpec) -> Result<(), EnvDaemonError> {
         std::fs::create_dir_all(env_root())?;
         std::fs::create_dir_all(bootstrap_dir())?;
+        let _startup_lock =
+            StartupLock::acquire(startup_lock_path(&env_spec.name), Duration::from_secs(10))
+                .await?;
         let socket = socket_path(&env_spec.name);
         if can_connect(&socket).await {
             return Err(EnvDaemonError::AlreadyRunning(env_spec.name.clone()));
@@ -85,7 +93,7 @@ impl EnvRegistry {
         let timeout = Duration::from_secs(5);
         let mut waited = Duration::ZERO;
         while waited < timeout {
-            if pid_path(&env_spec.name).exists() && can_connect(&socket).await {
+            if read_pid(&env_spec.name) == Some(child.id()) && can_connect(&socket).await {
                 let _ = std::fs::remove_file(&bootstrap_path);
                 return Ok(());
             }
@@ -143,6 +151,12 @@ fn cleanup_bootstrap_timeout(child: &mut std::process::Child, bootstrap_path: &P
 
 async fn can_connect(socket: &Path) -> bool {
     ipc::connect(socket).await.is_ok()
+}
+
+fn read_pid(env: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_path(env))
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
 }
 
 #[cfg(test)]

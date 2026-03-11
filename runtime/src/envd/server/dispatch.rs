@@ -66,16 +66,19 @@ pub(super) async fn dispatch_action(
             }
             reset_env_can_state(state);
             state.time.reset();
+            state.realtime_tick_backlog = 0;
             Ok(ResponseData::Ack)
         }
         EnvAction::TimeStart { env } => {
             ensure_env_name(state, &env)?;
             state.time.start().map_err(|err| err.to_string())?;
+            state.realtime_tick_backlog = 0;
             env_time_status(state)
         }
         EnvAction::TimePause { env } => {
             ensure_env_name(state, &env)?;
             state.time.pause().map_err(|err| err.to_string())?;
+            state.realtime_tick_backlog = 0;
             env_time_status(state)
         }
         EnvAction::TimeSpeed { env, multiplier } => {
@@ -262,6 +265,7 @@ pub(super) async fn dispatch_action(
             ensure_env_name(state, &env)?;
             let duration_us =
                 crate::protocol::parse_duration_us(&duration).map_err(|err| err.to_string())?;
+            state.realtime_tick_backlog = 0;
             let step = state
                 .time
                 .step_ticks(state.tick_duration_us, duration_us)

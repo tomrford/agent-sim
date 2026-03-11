@@ -75,6 +75,17 @@ impl LocalListener {
     }
 }
 
+pub async fn bind_listener(endpoint: &Path) -> std::io::Result<LocalListener> {
+    match LocalListener::bind(endpoint) {
+        Ok(listener) => Ok(listener),
+        Err(err) if is_bind_conflict(&err) && connect(endpoint).await.is_err() => {
+            cleanup_endpoint(endpoint);
+            LocalListener::bind(endpoint)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub async fn connect(endpoint: &Path) -> std::io::Result<BoxedLocalStream> {
     #[cfg(unix)]
     {
@@ -121,6 +132,13 @@ pub fn create_endpoint_marker(endpoint: &Path) -> std::io::Result<()> {
     {
         std::fs::write(endpoint, [])
     }
+}
+
+fn is_bind_conflict(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+    )
 }
 
 #[cfg(windows)]

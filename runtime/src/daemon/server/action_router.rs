@@ -50,6 +50,7 @@ pub(super) async fn dispatch_instance_action(
         InstanceAction::Reset => {
             state.project.reset().map_err(|e| e.to_string())?;
             state.time.reset();
+            state.realtime_tick_backlog = 0;
             Ok(ResponseData::Ack)
         }
         InstanceAction::Get { selectors } => {
@@ -96,6 +97,7 @@ pub(super) async fn dispatch_instance_action(
         InstanceAction::TimeStart => {
             reject_local_time_control(state)?;
             state.time.start().map_err(|e| e.to_string())?;
+            state.realtime_tick_backlog = 0;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
@@ -107,6 +109,7 @@ pub(super) async fn dispatch_instance_action(
         InstanceAction::TimePause => {
             reject_local_time_control(state)?;
             state.time.pause().map_err(|e| e.to_string())?;
+            state.realtime_tick_backlog = 0;
             let status = state.time.status(state.project.tick_duration_us());
             Ok(ResponseData::TimeStatus {
                 state: status.state,
@@ -118,6 +121,7 @@ pub(super) async fn dispatch_instance_action(
         InstanceAction::TimeStep { duration } => {
             reject_local_time_control(state)?;
             let duration_us = parse_duration_us(&duration).map_err(|e| e.to_string())?;
+            state.realtime_tick_backlog = 0;
             let step = state
                 .time
                 .step_ticks(state.project.tick_duration_us(), duration_us)
