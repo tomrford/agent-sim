@@ -41,7 +41,7 @@ pub async fn send_env_request(env: &str, request: &Request) -> Result<Response, 
 #[derive(Debug, Clone, Copy)]
 struct RequestTransport {
     max_attempts: u32,
-    retry_delay: Duration,
+    retry_delay_base: Duration,
     connect_timeout: Duration,
     write_timeout: Duration,
     read_timeout: Duration,
@@ -50,9 +50,9 @@ struct RequestTransport {
 impl Default for RequestTransport {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
-            retry_delay: Duration::from_millis(200),
-            connect_timeout: Duration::from_secs(30),
+            max_attempts: 3,
+            retry_delay_base: Duration::from_millis(100),
+            connect_timeout: Duration::from_secs(2),
             write_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(30),
         }
@@ -77,13 +77,39 @@ impl RequestTransport {
                 Ok(response) => return Ok(response),
                 Err(err) => {
                     attempt += 1;
-                    if attempt >= self.max_attempts {
+                    if attempt >= self.max_attempts || !self.should_retry(&err) {
                         return Err(err);
                     }
-                    sleep(self.retry_delay).await;
+                    sleep(self.retry_delay_for_attempt(attempt)).await;
                 }
             }
         }
+    }
+
+    fn should_retry(self, err: &ConnectionError) -> bool {
+        match err {
+            ConnectionError::Timeout => true,
+            ConnectionError::Io(io_err) => matches!(
+                io_err.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            ),
+            ConnectionError::Daemon(_)
+            | ConnectionError::EnvDaemon(_)
+            | ConnectionError::Serde(_)
+            | ConnectionError::MissingResponse => false,
+        }
+    }
+
+    fn retry_delay_for_attempt(self, attempt: u32) -> Duration {
+        let shift = attempt.saturating_sub(1).min(3);
+        self.retry_delay_base
+            .checked_mul(1_u32 << shift)
+            .unwrap_or(self.retry_delay_base)
     }
 
     async fn send_once(
@@ -133,5 +159,54 @@ impl EnvConnector {
     async fn prepare(self, env: &str) -> Result<(), ConnectionError> {
         ensure_env_running(env).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionError, RequestTransport};
+    use std::io::ErrorKind;
+    use tokio::time::Duration;
+
+    #[test]
+    fn request_transport_retries_only_transient_failures() {
+        let transport = RequestTransport::default();
+        assert!(transport.should_retry(&ConnectionError::Timeout));
+        assert!(
+            transport.should_retry(&ConnectionError::Io(std::io::Error::from(
+                ErrorKind::ConnectionRefused
+            )))
+        );
+        assert!(
+            !transport.should_retry(&ConnectionError::Io(std::io::Error::from(
+                ErrorKind::InvalidData
+            )))
+        );
+        assert!(!transport.should_retry(&ConnectionError::MissingResponse));
+    }
+
+    #[test]
+    fn request_transport_uses_bounded_exponential_backoff() {
+        let transport = RequestTransport::default();
+        assert_eq!(
+            transport.retry_delay_for_attempt(1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            transport.retry_delay_for_attempt(2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            transport.retry_delay_for_attempt(3),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            transport.retry_delay_for_attempt(4),
+            Duration::from_millis(800)
+        );
+        assert_eq!(
+            transport.retry_delay_for_attempt(5),
+            Duration::from_millis(800)
+        );
     }
 }
