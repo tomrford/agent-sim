@@ -239,25 +239,6 @@ impl EnvState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_env_tick_duration_us;
-
-    #[test]
-    fn validate_env_tick_duration_rejects_zero() {
-        let err = validate_env_tick_duration_us("demo", 0).expect_err("zero tick must fail");
-        assert!(err.contains("invalid zero tick duration"));
-    }
-
-    #[test]
-    fn validate_env_tick_duration_accepts_positive_value() {
-        assert_eq!(
-            validate_env_tick_duration_us("demo", 50).expect("positive tick must pass"),
-            50
-        );
-    }
-}
-
 pub(super) async fn attach_shared_channel(
     env_name: &str,
     shared: &crate::envd::spec::EnvSharedChannelSpec,
@@ -347,5 +328,24 @@ async fn shutdown_bootstrapped_instances(instances: &[String]) {
         {
             let _ = kill_pid(pid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_env_tick_duration_us;
+
+    #[test]
+    fn validate_env_tick_duration_rejects_zero() {
+        let err = validate_env_tick_duration_us("demo", 0).expect_err("zero tick must fail");
+        assert!(err.contains("invalid zero tick duration"));
+    }
+
+    #[test]
+    fn validate_env_tick_duration_accepts_positive_value() {
+        assert_eq!(
+            validate_env_tick_duration_us("demo", 50).expect("positive tick must pass"),
+            50
+        );
     }
 }

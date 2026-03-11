@@ -647,30 +647,6 @@ impl Project {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_tick_duration_us;
-    use crate::sim::error::ProjectError;
-
-    #[test]
-    fn validate_tick_duration_rejects_zero() {
-        let err = validate_tick_duration_us(0, "sim_get_tick_duration_us")
-            .expect_err("zero tick duration must fail");
-        assert!(
-            matches!(err, ProjectError::LibraryLoad(message) if message.contains("invalid zero tick duration"))
-        );
-    }
-
-    #[test]
-    fn validate_tick_duration_accepts_positive_value() {
-        assert_eq!(
-            validate_tick_duration_us(20, "sim_get_tick_duration_us")
-                .expect("positive tick duration must pass"),
-            20
-        );
-    }
-}
-
 fn validate_dense_shared_snapshot(
     slots: &[SimSharedSlot],
     expected_slot_count: usize,
@@ -693,4 +669,28 @@ fn validate_dense_shared_snapshot(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_tick_duration_us;
+    use crate::sim::error::ProjectError;
+
+    #[test]
+    fn validate_tick_duration_rejects_zero() {
+        let err = validate_tick_duration_us(0, "sim_get_tick_duration_us")
+            .expect_err("zero tick duration must fail");
+        assert!(
+            matches!(err, ProjectError::LibraryLoad(message) if message.contains("invalid zero tick duration"))
+        );
+    }
+
+    #[test]
+    fn validate_tick_duration_accepts_positive_value() {
+        assert_eq!(
+            validate_tick_duration_us(20, "sim_get_tick_duration_us")
+                .expect("positive tick duration must pass"),
+            20
+        );
+    }
 }
