@@ -12,7 +12,7 @@ use crate::can::dbc::{DbcBusOverlay, frame_key_from_frame};
 use crate::daemon::lifecycle::{kill_pid, read_pid};
 use crate::envd::lifecycle::pid_path;
 use crate::envd::spec::EnvSpec;
-use crate::ipc::{self, BoxedLocalStream, LocalListener};
+use crate::ipc::{self, BoxedLocalStream};
 use crate::protocol::{
     CanFrameData, InstanceAction, Request, RequestAction, Response, parse_duration_us,
 };
@@ -24,7 +24,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::timeout;
+use tokio::task::yield_now;
+use tokio::time::sleep;
+
+const MAX_ENV_ACTIONS_PER_TURN: usize = 16;
+const MAX_ENV_TICKS_PER_TURN: u64 = 64;
 
 struct EnvState {
     name: String,
@@ -33,6 +37,7 @@ struct EnvState {
     instances: Vec<String>,
     instance_workers: HashMap<String, instance_worker::InstanceWorker>,
     time: TimeEngine,
+    realtime_tick_backlog: u64,
     can_buses: BTreeMap<String, EnvCanBusState>,
     shutdown: bool,
 }
@@ -67,7 +72,6 @@ struct ActionMessage {
 }
 
 pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(), std::io::Error> {
-    ipc::cleanup_endpoint(&socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -75,7 +79,7 @@ pub async fn run_listener(socket_path: PathBuf, env_spec: EnvSpec) -> Result<(),
     let state = EnvState::bootstrap(socket_path.clone(), env_spec)
         .await
         .map_err(std::io::Error::other)?;
-    let mut listener = match LocalListener::bind(&socket_path) {
+    let mut listener = match ipc::bind_listener(&socket_path).await {
         Ok(listener) => listener,
         Err(err) => {
             cleanup_listener_runtime(&state).await;
@@ -203,34 +207,60 @@ async fn run_actor_task(
     shutdown_tx: watch::Sender<bool>,
 ) -> EnvState {
     loop {
-        while let Ok(message) = action_rx.try_recv() {
-            process_action_message(message, &mut state).await;
-        }
+        process_env_action_batch(&mut action_rx, &mut state, MAX_ENV_ACTIONS_PER_TURN).await;
 
         if state.shutdown {
             break;
         }
 
-        let due_ticks = state.time.tick_realtime_due(state.tick_duration_us);
-        if let Err(err) = tick::advance_due_ticks(&mut state, due_ticks).await {
+        state.realtime_tick_backlog = state
+            .realtime_tick_backlog
+            .saturating_add(state.time.tick_realtime_due(state.tick_duration_us));
+        let tick_batch = state.realtime_tick_backlog.min(MAX_ENV_TICKS_PER_TURN);
+        if let Err(err) = tick::advance_due_ticks(&mut state, tick_batch).await {
             tracing::error!("env '{}' tick loop failed: {err}", state.name);
             state.shutdown = true;
+        } else {
+            state.realtime_tick_backlog = state.realtime_tick_backlog.saturating_sub(tick_batch);
         }
 
         if state.shutdown {
             break;
+        }
+
+        if state.realtime_tick_backlog > 0 {
+            yield_now().await;
+            continue;
         }
 
         let sleep_duration = state.time.realtime_poll_delay(state.tick_duration_us);
-        match timeout(sleep_duration, action_rx.recv()).await {
-            Ok(Some(message)) => process_action_message(message, &mut state).await,
-            Ok(None) => break,
-            Err(_) => {}
+        tokio::select! {
+            received = action_rx.recv() => match received {
+                Some(message) => process_action_message(message, &mut state).await,
+                None => break,
+            },
+            _ = sleep(sleep_duration) => {}
         }
     }
 
     let _ = shutdown_tx.send(true);
     state
+}
+
+async fn process_env_action_batch(
+    action_rx: &mut mpsc::Receiver<ActionMessage>,
+    state: &mut EnvState,
+    max_actions: usize,
+) {
+    for _ in 0..max_actions {
+        let Ok(message) = action_rx.try_recv() else {
+            break;
+        };
+        process_action_message(message, state).await;
+        if state.shutdown {
+            break;
+        }
+    }
 }
 
 fn duration_to_env_ticks(tick_duration_us: u32, raw: &str) -> Result<u64, String> {
@@ -413,9 +443,11 @@ mod tests {
     use crate::envd::spec::EnvInstanceSpec;
     use crate::ipc::LocalListener;
     use crate::load::LoadSpec;
-    use crate::protocol::{ResponseData, WorkerAction};
+    use crate::protocol::{EnvAction, InstanceAction, RequestAction, ResponseData, WorkerAction};
     use serial_test::serial;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::time::Duration;
+    use uuid::Uuid;
 
     fn frame(arb_id: u32, flags: u8, data: &[u8]) -> SimCanFrame {
         let mut payload = [0_u8; 64];
@@ -540,6 +572,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn process_env_action_batch_limits_control_plane_work_per_turn() {
+        let (action_tx, mut action_rx) = mpsc::channel(8);
+        let mut responses = Vec::new();
+        for _ in 0..4 {
+            let (response_tx, response_rx) = oneshot::channel();
+            action_tx
+                .send(ActionMessage {
+                    request: Request {
+                        id: Uuid::new_v4(),
+                        action: RequestAction::Env(EnvAction::TimeStatus {
+                            env: "env".to_string(),
+                        }),
+                    },
+                    response_tx,
+                })
+                .await
+                .expect("action should enqueue");
+            responses.push(response_rx);
+        }
+
+        let mut state = EnvState {
+            name: "env".to_string(),
+            socket_path: PathBuf::new(),
+            tick_duration_us: 20,
+            instances: Vec::new(),
+            instance_workers: HashMap::new(),
+            time: TimeEngine::default(),
+            realtime_tick_backlog: 0,
+            can_buses: BTreeMap::new(),
+            shutdown: false,
+        };
+
+        process_env_action_batch(&mut action_rx, &mut state, 2).await;
+
+        for response in responses.iter_mut().take(2) {
+            assert!(
+                response.try_recv().is_ok(),
+                "processed action should have a response"
+            );
+        }
+        for response in responses.iter_mut().skip(2) {
+            assert!(
+                response.try_recv().is_err(),
+                "unprocessed action should remain queued"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn advance_single_tick_issues_direct_worker_step() {
         let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
@@ -602,6 +683,7 @@ mod tests {
             instances: vec![instance.to_string()],
             instance_workers: HashMap::from([(instance.to_string(), worker)]),
             time: TimeEngine::default(),
+            realtime_tick_backlog: 0,
             can_buses: BTreeMap::new(),
             shutdown: false,
         };
@@ -613,6 +695,130 @@ mod tests {
 
         assert_eq!(state.time.status(state.tick_duration_us).elapsed_ticks, 1);
 
+        restore_agent_sim_home(original_home);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn instance_worker_times_out_when_instance_never_replies() {
+        let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
+        let original_home = std::env::var_os("AGENT_SIM_HOME");
+        unsafe {
+            std::env::set_var("AGENT_SIM_HOME", home.path());
+        }
+
+        let instance = "instance-timeout";
+        let socket_path = crate::daemon::lifecycle::socket_path(instance);
+        std::fs::create_dir_all(
+            socket_path
+                .parent()
+                .expect("instance socket should have a parent directory"),
+        )
+        .expect("instance socket parent should be creatable");
+        let mut listener =
+            LocalListener::bind(&socket_path).expect("fake instance listener should bind");
+        let server = tokio::spawn(async move {
+            let mut stream = listener
+                .accept()
+                .await
+                .expect("fake instance should accept worker connection");
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut stream);
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("request should be readable");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        let worker = instance_worker::InstanceWorker::connect_with_timeout(
+            instance,
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("test worker should connect to fake instance");
+        let response_rx = worker
+            .begin_instance_request(InstanceAction::Info)
+            .await
+            .expect("info request should queue");
+        let response = response_rx.await.expect("timeout response should arrive");
+        let err = response.expect_err("worker request should time out");
+        assert!(
+            err.contains("timed out reading env worker response"),
+            "unexpected timeout error: {err}"
+        );
+
+        let follow_up = worker.begin_worker_request(WorkerAction::CanBuses).await;
+        assert!(
+            follow_up.is_err(),
+            "worker connection should close after timeout"
+        );
+
+        server.await.expect("fake instance task should finish");
+        restore_agent_sim_home(original_home);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn advance_single_tick_errors_without_advancing_time_when_worker_times_out() {
+        let home = tempfile::tempdir().expect("temp AGENT_SIM_HOME should be creatable");
+        let original_home = std::env::var_os("AGENT_SIM_HOME");
+        unsafe {
+            std::env::set_var("AGENT_SIM_HOME", home.path());
+        }
+
+        let instance = "instance-timeout";
+        let socket_path = crate::daemon::lifecycle::socket_path(instance);
+        std::fs::create_dir_all(
+            socket_path
+                .parent()
+                .expect("instance socket should have a parent directory"),
+        )
+        .expect("instance socket parent should be creatable");
+        let mut listener =
+            LocalListener::bind(&socket_path).expect("fake instance listener should bind");
+        let server = tokio::spawn(async move {
+            let mut stream = listener
+                .accept()
+                .await
+                .expect("fake instance should accept worker connection");
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut stream);
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("request should be readable");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        let worker = instance_worker::InstanceWorker::connect_with_timeout(
+            instance,
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("test worker should connect to fake instance");
+        let mut state = EnvState {
+            name: "env".to_string(),
+            socket_path: PathBuf::new(),
+            tick_duration_us: 20,
+            instances: vec![instance.to_string()],
+            instance_workers: HashMap::from([(instance.to_string(), worker)]),
+            time: TimeEngine::default(),
+            realtime_tick_backlog: 0,
+            can_buses: BTreeMap::new(),
+            shutdown: false,
+        };
+
+        let err = tick::advance_single_tick(&mut state)
+            .await
+            .expect_err("worker timeout should fail the env tick");
+        assert!(
+            err.contains("timed out reading env worker response"),
+            "unexpected timeout error: {err}"
+        );
+        assert_eq!(state.time.status(state.tick_duration_us).elapsed_ticks, 0);
+
+        server.await.expect("fake instance task should finish");
         restore_agent_sim_home(original_home);
     }
 

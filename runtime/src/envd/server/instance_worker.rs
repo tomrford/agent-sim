@@ -5,7 +5,10 @@ use crate::protocol::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf, split};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
+
+const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum InstanceWorkerMessage {
     Request {
@@ -20,6 +23,13 @@ pub(super) struct InstanceWorker {
 
 impl InstanceWorker {
     pub(super) async fn connect(instance_name: &str) -> Result<Self, String> {
+        Self::connect_with_timeout(instance_name, DEFAULT_IO_TIMEOUT).await
+    }
+
+    pub(super) async fn connect_with_timeout(
+        instance_name: &str,
+        io_timeout: Duration,
+    ) -> Result<Self, String> {
         let stream = ipc::connect(&socket_path(instance_name))
             .await
             .map_err(|err| {
@@ -35,6 +45,7 @@ impl InstanceWorker {
             read_half,
             write_half,
             request_rx,
+            io_timeout,
         ));
         Ok(Self { request_tx })
     }
@@ -74,6 +85,7 @@ async fn run_worker(
     read_half: ReadHalf<BoxedLocalStream>,
     mut write_half: WriteHalf<BoxedLocalStream>,
     mut request_rx: mpsc::Receiver<InstanceWorkerMessage>,
+    io_timeout: Duration,
 ) {
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -93,9 +105,21 @@ async fn run_worker(
             &mut write_half,
             &request,
             &mut line,
+            io_timeout,
         )
         .await;
+        let worker_failed = result.is_err();
+        let err_message = result.as_ref().err().cloned();
         let _ = response_tx.send(result);
+        if worker_failed {
+            if let Some(err) = err_message {
+                tracing::warn!(
+                    "env worker connection to '{}' became unusable: {err}",
+                    instance_name
+                );
+            }
+            break;
+        }
     }
 }
 
@@ -105,19 +129,33 @@ async fn send_request(
     write_half: &mut WriteHalf<BoxedLocalStream>,
     request: &Request,
     line: &mut String,
+    io_timeout: Duration,
 ) -> Result<ResponseData, String> {
     let mut payload = serde_json::to_string(request)
         .map_err(|err| format!("failed to serialize worker request: {err}"))?;
     payload.push('\n');
-    write_half
-        .write_all(payload.as_bytes())
+    timeout(io_timeout, write_half.write_all(payload.as_bytes()))
         .await
+        .map_err(|_| {
+            format!(
+                "timed out writing env worker request to '{instance_name}' after {}ms",
+                io_timeout.as_millis()
+            )
+        })?
         .map_err(|err| format!("failed writing env worker request to '{instance_name}': {err}"))?;
 
     line.clear();
-    let read = reader.read_line(line).await.map_err(|err| {
-        format!("failed reading env worker response from '{instance_name}': {err}")
-    })?;
+    let read = timeout(io_timeout, reader.read_line(line))
+        .await
+        .map_err(|_| {
+            format!(
+                "timed out reading env worker response from '{instance_name}' after {}ms",
+                io_timeout.as_millis()
+            )
+        })?
+        .map_err(|err| {
+            format!("failed reading env worker response from '{instance_name}': {err}")
+        })?;
     if read == 0 {
         return Err(format!(
             "instance '{}' closed its worker connection unexpectedly",
@@ -126,6 +164,12 @@ async fn send_request(
     }
     let response: Response = serde_json::from_str(line.trim_end())
         .map_err(|err| format!("invalid env worker response from '{instance_name}': {err}"))?;
+    if response.id != request.id {
+        return Err(format!(
+            "mismatched env worker response id from '{instance_name}': expected {}, got {}",
+            request.id, response.id
+        ));
+    }
     if response.success {
         response
             .data

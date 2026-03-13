@@ -1,6 +1,7 @@
 use crate::daemon::error::DaemonError;
 use crate::ipc;
 use crate::load::{LoadSpec, write_load_spec};
+use crate::process::StartupLock;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -44,6 +45,12 @@ pub fn bootstrap_dir() -> PathBuf {
     session_root().join("bootstrap")
 }
 
+fn startup_lock_path(session: &str) -> PathBuf {
+    session_root()
+        .join("locks")
+        .join(format!("{session}.instance.lock"))
+}
+
 pub async fn ensure_daemon_running(session: &str) -> Result<(), DaemonError> {
     InstanceRegistry.ensure_running(session).await
 }
@@ -85,6 +92,8 @@ impl InstanceRegistry {
     ) -> Result<(), DaemonError> {
         std::fs::create_dir_all(session_root())?;
         std::fs::create_dir_all(bootstrap_dir())?;
+        let _startup_lock =
+            StartupLock::acquire(startup_lock_path(session), Duration::from_secs(10)).await?;
         let socket = socket_path(session);
         if can_connect(&socket).await {
             return Err(DaemonError::AlreadyRunning(session.to_string()));
@@ -104,7 +113,7 @@ impl InstanceRegistry {
         let timeout = Duration::from_secs(5);
         let mut waited = Duration::from_millis(0);
         while waited < timeout {
-            if pid_path(session).exists() && can_connect(&socket).await {
+            if read_pid(session) == Some(child.id()) && can_connect(&socket).await {
                 let _ = std::fs::remove_file(&bootstrap_path);
                 return Ok(());
             }

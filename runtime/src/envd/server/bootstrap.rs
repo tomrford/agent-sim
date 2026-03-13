@@ -233,6 +233,7 @@ impl EnvState {
                 .collect(),
             instance_workers,
             time: crate::sim::time::TimeEngine::default(),
+            realtime_tick_backlog: 0,
             can_buses,
             shutdown: false,
         })

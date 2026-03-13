@@ -9,7 +9,7 @@ mod tick_ops;
 
 use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
-use crate::ipc::{self, BoxedLocalStream, LocalListener};
+use crate::ipc::{self, BoxedLocalStream};
 use crate::protocol::{Request, RequestAction, Response};
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
@@ -32,6 +32,7 @@ pub struct DaemonState {
     shared_attached: HashMap<String, AttachedSharedChannel>,
     frame_state: HashMap<String, HashMap<u32, SimCanFrame>>,
     time: TimeEngine,
+    realtime_tick_backlog: u64,
     shutdown: bool,
 }
 
@@ -68,6 +69,7 @@ impl DaemonState {
             shared_attached: HashMap::new(),
             frame_state: HashMap::new(),
             time: TimeEngine::default(),
+            realtime_tick_backlog: 0,
             shutdown: false,
         }
     }
@@ -154,11 +156,10 @@ pub async fn run_listener(
     project: Project,
     env: Option<String>,
 ) -> Result<(), std::io::Error> {
-    ipc::cleanup_endpoint(&socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut listener = LocalListener::bind(&socket_path)?;
+    let mut listener = ipc::bind_listener(&socket_path).await?;
     ipc::create_endpoint_marker(&socket_path)?;
     let pid_path = crate::daemon::lifecycle::pid_path(&session);
     std::fs::write(&pid_path, std::process::id().to_string())?;
@@ -167,9 +168,15 @@ pub async fn run_listener(
 
     let state = DaemonState::new(session.clone(), socket_path.clone(), project, env);
     let (action_tx, action_rx) = mpsc::channel::<ActionMessage>(256);
+    let (worker_action_tx, worker_action_rx) = mpsc::channel::<ActionMessage>(256);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    let tick_task = tokio::spawn(tick_ops::run_tick_task(state, action_rx, shutdown_tx));
+    let tick_task = tokio::spawn(tick_ops::run_tick_task(
+        state,
+        action_rx,
+        worker_action_rx,
+        shutdown_tx,
+    ));
     let mut listener_error = None;
 
     loop {
@@ -185,8 +192,9 @@ pub async fn run_listener(
                 match accepted {
                     Ok(stream) => {
                         let action_tx = action_tx.clone();
+                        let worker_action_tx = worker_action_tx.clone();
                         tokio::spawn(async move {
-                            let _ = handle_connection(stream, action_tx).await;
+                            let _ = handle_connection(stream, action_tx, worker_action_tx).await;
                         });
                     }
                     Err(e) => {
@@ -199,6 +207,7 @@ pub async fn run_listener(
     }
 
     drop(action_tx);
+    drop(worker_action_tx);
     let _ = tick_task.await;
 
     ipc::cleanup_endpoint(&socket_path);
@@ -216,6 +225,7 @@ pub async fn run_listener(
 async fn handle_connection(
     stream: BoxedLocalStream,
     action_tx: mpsc::Sender<ActionMessage>,
+    worker_action_tx: mpsc::Sender<ActionMessage>,
 ) -> Result<(), std::io::Error> {
     let (read_half, mut write_half) = split(stream);
     let mut reader = BufReader::new(read_half);
@@ -231,7 +241,12 @@ async fn handle_connection(
             Ok(request) => {
                 let request_id = request.id;
                 let (response_tx, response_rx) = oneshot::channel();
-                if action_tx
+                let target_tx = if matches!(&request.action, RequestAction::Worker(_)) {
+                    &worker_action_tx
+                } else {
+                    &action_tx
+                };
+                if target_tx
                     .send(ActionMessage {
                         request,
                         response_tx,

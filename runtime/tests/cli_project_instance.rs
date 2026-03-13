@@ -1,9 +1,10 @@
 mod common;
 
 use common::{
-    ensure_fixtures_built, hvac_lib_path, run_agent, run_agent_fail, template_lib_path,
-    unique_session,
+    ensure_fixtures_built, hvac_lib_path, run_agent, run_agent_capture_in_home, run_agent_fail,
+    template_lib_path, unique_session,
 };
+use serial_test::serial;
 
 #[test]
 fn load_info_and_reset_workflow() {
@@ -65,6 +66,52 @@ fn second_load_same_session_is_rejected() {
     );
 
     let _ = run_agent(&["--instance", &session, "close"]);
+}
+
+#[test]
+#[serial]
+fn concurrent_load_same_session_leaves_one_reachable_daemon() {
+    ensure_fixtures_built();
+    let home = tempfile::tempdir().expect("temp home should be creatable");
+    let session = unique_session("project-concurrent-load");
+    let libpath = template_lib_path().to_string_lossy().into_owned();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run_agent_capture_in_home(home.path(), &["--instance", &session, "load", &libpath])
+        });
+        let second = scope.spawn(|| {
+            run_agent_capture_in_home(home.path(), &["--instance", &session, "load", &libpath])
+        });
+        (
+            first.join().expect("first load thread should join"),
+            second.join().expect("second load thread should join"),
+        )
+    });
+
+    let successes = [first.0, second.0]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1, "expected exactly one successful load");
+    let combined_stderr = format!("{}\n{}", first.2, second.2);
+    assert!(
+        combined_stderr.contains("already has a running daemon"),
+        "expected duplicate load rejection, got: {combined_stderr}"
+    );
+
+    let info_out = run_agent_capture_in_home(home.path(), &["--instance", &session, "info"]);
+    assert!(
+        info_out.0,
+        "instance should remain reachable after concurrent load"
+    );
+
+    let close_out = run_agent_capture_in_home(home.path(), &["--instance", &session, "close"]);
+    assert!(close_out.0, "close should succeed after concurrent load");
+    assert!(
+        !home.path().join(format!("{session}.pid")).exists(),
+        "pid file should be removed after close"
+    );
 }
 
 #[test]

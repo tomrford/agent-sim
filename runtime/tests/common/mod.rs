@@ -58,7 +58,12 @@ pub fn run_agent(args: &[&str]) -> String {
 }
 
 pub fn run_agent_in_home(home: &Path, args: &[&str]) -> String {
-    run_agent_command(home, args, true).0
+    let (success, stdout, stderr) = run_agent_capture_in_home(home, args);
+    assert!(
+        success,
+        "command failed: args={args:?}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    stdout
 }
 
 #[allow(dead_code)]
@@ -68,10 +73,15 @@ pub fn run_agent_fail(args: &[&str]) -> String {
 
 #[allow(dead_code)]
 pub fn run_agent_fail_in_home(home: &Path, args: &[&str]) -> String {
-    run_agent_command(home, args, false).1
+    let (success, _stdout, stderr) = run_agent_capture_in_home(home, args);
+    assert!(
+        !success,
+        "command unexpectedly succeeded: args={args:?}\nstderr: {stderr}"
+    );
+    stderr
 }
 
-fn run_agent_command(home: &Path, args: &[&str], expect_success: bool) -> (String, String) {
+pub fn run_agent_capture_in_home(home: &Path, args: &[&str]) -> (bool, String, String) {
     use std::sync::mpsc;
 
     let exe = resolve_agent_exe();
@@ -131,19 +141,7 @@ fn run_agent_command(home: &Path, args: &[&str], expect_success: bool) -> (Strin
     let stderr =
         std::fs::read_to_string(stderr_file.path()).expect("stderr temp file should be readable");
 
-    if expect_success {
-        assert!(
-            status.success(),
-            "command failed: exe='{exe}' args={args:?}\nstdout: {stdout}\nstderr: {stderr}"
-        );
-    } else {
-        assert!(
-            !status.success(),
-            "command unexpectedly succeeded: exe='{exe}' args={args:?}\nstdout: {stdout}\nstderr: {stderr}"
-        );
-    }
-
-    (stdout, stderr)
+    (status.success(), stdout, stderr)
 }
 
 fn run_command(dir: &Path, program: &str, args: &[&str]) {
