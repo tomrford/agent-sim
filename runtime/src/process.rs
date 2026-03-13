@@ -62,9 +62,8 @@ pub fn kill_pid(pid: u32) -> std::io::Result<()> {
 #[cfg(windows)]
 pub fn pid_exists(pid: u32) -> std::io::Result<bool> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
-    };
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
