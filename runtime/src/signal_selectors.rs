@@ -1,7 +1,7 @@
 use crate::sim::project::Project;
 use crate::sim::types::SignalType;
 use globset::{Glob, GlobMatcher};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub type SelectorError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -127,8 +127,13 @@ impl EnvSignalCatalog {
             return Err("missing env signal selectors".to_string());
         }
         let mut resolved = Vec::new();
+        let mut seen = HashSet::new();
         for selector in selectors {
-            resolved.extend(self.resolve_selector_indices(selector)?);
+            for index in self.resolve_selector_indices(selector)? {
+                if seen.insert(index) {
+                    resolved.push(index);
+                }
+            }
         }
         Ok(resolved)
     }
@@ -192,5 +197,63 @@ fn string_matches(value: &str, selector: &str, glob: Option<&GlobMatcher>) -> bo
         glob.is_match(value)
     } else {
         value == selector
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EnvSignalCatalog, EnvSignalCatalogEntry};
+    use crate::sim::types::SignalType;
+
+    fn entry(instance: &str, local_id: u32, signal_name: &str) -> EnvSignalCatalogEntry {
+        EnvSignalCatalogEntry {
+            instance: instance.to_string(),
+            local_id,
+            signal_name: signal_name.to_string(),
+            qualified_name: format!("{instance}:{signal_name}"),
+            signal_type: SignalType::F32,
+            units: None,
+        }
+    }
+
+    #[test]
+    fn env_selector_resolution_dedupes_overlapping_matches_in_first_seen_order() {
+        let catalog = EnvSignalCatalog::build(vec![
+            entry("inst-a", 1, "alpha"),
+            entry("inst-a", 2, "beta"),
+            entry("inst-b", 3, "alpha"),
+        ])
+        .expect("catalog should build");
+
+        let selectors = vec!["inst-a:*".to_string(), "inst-a:alpha".to_string()];
+        let resolved = catalog
+            .resolve_selectors(&selectors)
+            .expect("selectors should resolve");
+        let names = resolved
+            .into_iter()
+            .map(|idx| catalog.entries()[idx].qualified_name.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["inst-a:alpha", "inst-a:beta"]);
+    }
+
+    #[test]
+    fn env_selector_resolution_keeps_first_selector_precedence() {
+        let catalog = EnvSignalCatalog::build(vec![
+            entry("inst-a", 1, "alpha"),
+            entry("inst-b", 2, "alpha"),
+        ])
+        .expect("catalog should build");
+
+        let selectors = vec!["inst-b:alpha".to_string(), "*:*".to_string()];
+        let resolved = catalog
+            .resolve_selectors(&selectors)
+            .expect("selectors should resolve");
+        let names = resolved
+            .into_iter()
+            .map(|idx| catalog.entries()[idx].qualified_name.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["inst-b:alpha", "inst-a:alpha"]);
     }
 }
