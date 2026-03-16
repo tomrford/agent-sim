@@ -474,7 +474,12 @@ pub(super) fn advance_single_project_tick(state: &mut DaemonState) -> Result<(),
         .project
         .tick()
         .map_err(|e| TickStepError::pre_tick(e.to_string()))?;
-    sample_instance_trace_after_tick(state).map_err(TickStepError::post_tick)?;
+    let sample_tick = state
+        .time
+        .status(state.project.tick_duration_us())
+        .elapsed_ticks
+        .saturating_add(1);
+    sample_instance_trace_after_tick(state, sample_tick).map_err(TickStepError::post_tick)?;
     can_ops::process_can_tx(state).map_err(TickStepError::post_tick)?;
     shared_ops::process_shared_tx(state).map_err(TickStepError::post_tick)?;
     Ok(())
@@ -648,26 +653,24 @@ fn trace_status_response(state: &DaemonState) -> ResponseData {
     }
 }
 
-fn sample_instance_trace_after_tick(state: &mut DaemonState) -> Result<(), String> {
+fn sample_instance_trace_after_tick(
+    state: &mut DaemonState,
+    sample_tick: u64,
+) -> Result<(), String> {
     let Some(active) = &mut state.trace.active else {
         return Ok(());
     };
-    let next_tick = state
-        .time
-        .status(state.project.tick_duration_us())
-        .elapsed_ticks
-        .saturating_add(1);
-    if next_tick < active.next_due_tick {
+    if sample_tick < active.next_due_tick {
         return Ok(());
     }
 
-    let time_us = next_tick.saturating_mul(u64::from(state.project.tick_duration_us()));
+    let time_us = sample_tick.saturating_mul(u64::from(state.project.tick_duration_us()));
     let values = state
         .project
         .read_many(&active.signal_ids)
         .map_err(|e| e.to_string())?;
-    active.writer.write_row(next_tick, time_us, &values)?;
-    active.next_due_tick = next_tick.saturating_add(active.period_ticks);
+    active.writer.write_row(sample_tick, time_us, &values)?;
+    active.next_due_tick = sample_tick.saturating_add(active.period_ticks);
     update_trace_history_from_active(state);
     Ok(())
 }
