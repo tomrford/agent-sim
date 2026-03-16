@@ -16,6 +16,7 @@ use crate::ipc::{self, BoxedLocalStream};
 use crate::protocol::{
     CanFrameData, InstanceAction, Request, RequestAction, Response, parse_duration_us,
 };
+use crate::signal_selectors::EnvSignalCatalog;
 use crate::sim::time::TimeEngine;
 #[cfg(test)]
 use crate::sim::types::CAN_FLAG_EXTENDED;
@@ -35,6 +36,7 @@ struct EnvState {
     socket_path: PathBuf,
     tick_duration_us: u32,
     instances: Vec<String>,
+    signal_catalog: EnvSignalCatalog,
     instance_workers: HashMap<String, instance_worker::InstanceWorker>,
     time: TimeEngine,
     realtime_tick_backlog: u64,
@@ -597,6 +599,7 @@ mod tests {
             socket_path: PathBuf::new(),
             tick_duration_us: 20,
             instances: Vec::new(),
+            signal_catalog: EnvSignalCatalog::default(),
             instance_workers: HashMap::new(),
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,
@@ -681,6 +684,7 @@ mod tests {
             socket_path: PathBuf::new(),
             tick_duration_us: 20,
             instances: vec![instance.to_string()],
+            signal_catalog: EnvSignalCatalog::default(),
             instance_workers: HashMap::from([(instance.to_string(), worker)]),
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,
@@ -802,6 +806,7 @@ mod tests {
             socket_path: PathBuf::new(),
             tick_duration_us: 20,
             instances: vec![instance.to_string()],
+            signal_catalog: EnvSignalCatalog::default(),
             instance_workers: HashMap::from([(instance.to_string(), worker)]),
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,

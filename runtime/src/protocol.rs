@@ -98,6 +98,9 @@ pub enum WorkerAction {
         bus_name: String,
         vcan_iface: String,
     },
+    ReadSignals {
+        ids: Vec<u32>,
+    },
     CanDiscardPendingRx,
     Step,
 }
@@ -180,6 +183,14 @@ pub enum EnvAction {
         env: String,
         bus_name: Option<String>,
     },
+    Signals {
+        env: String,
+        selectors: Vec<String>,
+    },
+    Get {
+        env: String,
+        selectors: Vec<String>,
+    },
     Close {
         env: String,
     },
@@ -233,6 +244,9 @@ pub enum ResponseData {
     },
     SignalValues {
         values: Vec<SignalValueData>,
+    },
+    WorkerSignalValues {
+        values: Vec<WorkerSignalValueData>,
     },
     SignalSample {
         tick: u64,
@@ -297,6 +311,12 @@ pub enum ResponseData {
         instance_count: usize,
         tick_duration_us: u32,
     },
+    EnvSignals {
+        signals: Vec<EnvSignalData>,
+    },
+    EnvSignalValues {
+        values: Vec<EnvSignalValueData>,
+    },
     InstanceStatus {
         instance: String,
         socket_path: String,
@@ -326,11 +346,36 @@ pub struct SignalValueData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerSignalValueData {
+    pub id: u32,
+    pub value: SignalValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchSampleData {
     pub tick: u64,
     pub time_us: u64,
     pub signal: String,
     pub value: SignalValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSignalData {
+    pub instance: String,
+    pub local_id: u32,
+    pub name: String,
+    pub signal_type: SignalType,
+    pub units: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSignalValueData {
+    pub instance: String,
+    pub local_id: u32,
+    pub name: String,
+    pub signal_type: SignalType,
+    pub value: SignalValue,
+    pub units: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

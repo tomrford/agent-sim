@@ -5,8 +5,10 @@ use super::{
 };
 use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
-    CanBusData, CanScheduleData, EnvAction, InstanceAction, ResponseData, WorkerAction,
+    CanBusData, CanScheduleData, EnvAction, EnvSignalData, EnvSignalValueData, InstanceAction,
+    ResponseData, WorkerAction, WorkerSignalValueData,
 };
+use std::collections::BTreeMap;
 
 pub(super) async fn dispatch_action(
     action: EnvAction,
@@ -256,6 +258,29 @@ pub(super) async fn dispatch_action(
                 .collect::<Vec<_>>();
             Ok(ResponseData::CanSchedules { schedules })
         }
+        EnvAction::Signals { env, selectors } => {
+            ensure_env_name(state, &env)?;
+            let resolved = state.signal_catalog.resolve_selectors(&selectors)?;
+            let signals = resolved
+                .into_iter()
+                .map(|index| {
+                    let entry = &state.signal_catalog.entries()[index];
+                    EnvSignalData {
+                        instance: entry.instance.clone(),
+                        local_id: entry.local_id,
+                        name: entry.qualified_name.clone(),
+                        signal_type: entry.signal_type,
+                        units: entry.units.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(ResponseData::EnvSignals { signals })
+        }
+        EnvAction::Get { env, selectors } => {
+            ensure_env_name(state, &env)?;
+            let values = read_env_signal_values(state, &selectors).await?;
+            Ok(ResponseData::EnvSignalValues { values })
+        }
         EnvAction::Close { env } => {
             ensure_env_name(state, &env)?;
             state.shutdown = true;
@@ -299,4 +324,86 @@ pub(super) fn env_time_status(state: &EnvState) -> Result<ResponseData, String> 
         elapsed_time_us: status.elapsed_time_us,
         speed: status.speed,
     })
+}
+
+async fn read_env_signal_values(
+    state: &EnvState,
+    selectors: &[String],
+) -> Result<Vec<EnvSignalValueData>, String> {
+    let resolved = state.signal_catalog.resolve_selectors(selectors)?;
+    let mut grouped = BTreeMap::<String, Vec<(usize, u32)>>::new();
+    for (output_index, catalog_index) in resolved.iter().enumerate() {
+        let entry = &state.signal_catalog.entries()[*catalog_index];
+        grouped
+            .entry(entry.instance.clone())
+            .or_default()
+            .push((output_index, entry.local_id));
+    }
+
+    let mut values = vec![None; resolved.len()];
+    for (instance, request_items) in grouped {
+        let worker = state
+            .instance_workers
+            .get(&instance)
+            .ok_or_else(|| format!("missing env worker for instance '{instance}'"))?;
+        let ids = request_items
+            .iter()
+            .map(|(_, signal_id)| *signal_id)
+            .collect::<Vec<_>>();
+        let response_rx = worker
+            .begin_worker_request(WorkerAction::ReadSignals { ids: ids.clone() })
+            .await?;
+        let response = response_rx
+            .await
+            .map_err(|_| format!("read-signals response channel closed for instance '{instance}'"))??;
+        let ResponseData::WorkerSignalValues {
+            values: worker_values,
+        } = response
+        else {
+            return Err(format!(
+                "unexpected read-signals payload while reading instance '{instance}'"
+            ));
+        };
+        validate_worker_signal_values(&instance, &ids, &worker_values)?;
+        for ((output_index, _), worker_value) in request_items.into_iter().zip(worker_values) {
+            let catalog_index = resolved[output_index];
+            let entry = &state.signal_catalog.entries()[catalog_index];
+            values[output_index] = Some(EnvSignalValueData {
+                instance: entry.instance.clone(),
+                local_id: entry.local_id,
+                name: entry.qualified_name.clone(),
+                signal_type: entry.signal_type,
+                value: worker_value.value,
+                units: entry.units.clone(),
+            });
+        }
+    }
+
+    values
+        .into_iter()
+        .map(|value| value.ok_or_else(|| "missing grouped env signal value".to_string()))
+        .collect()
+}
+
+fn validate_worker_signal_values(
+    instance: &str,
+    requested_ids: &[u32],
+    values: &[WorkerSignalValueData],
+) -> Result<(), String> {
+    if values.len() != requested_ids.len() {
+        return Err(format!(
+            "instance '{instance}' returned {} values for {} requested ids",
+            values.len(),
+            requested_ids.len()
+        ));
+    }
+    for (idx, (expected, value)) in requested_ids.iter().zip(values.iter()).enumerate() {
+        if *expected != value.id {
+            return Err(format!(
+                "instance '{instance}' returned mismatched signal id at index {idx}: expected {expected}, got {}",
+                value.id
+            ));
+        }
+    }
+    Ok(())
 }

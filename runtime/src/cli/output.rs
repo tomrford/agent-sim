@@ -83,6 +83,16 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
+        Some(ResponseData::WorkerSignalValues { values }) => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["ID", "Value"]);
+            for signal in values {
+                table.add_row(vec![signal.id.to_string(), format!("{:?}", signal.value)]);
+            }
+            println!("{table}");
+        }
         Some(ResponseData::SignalSample {
             tick,
             time_us,
@@ -270,6 +280,39 @@ pub fn print_response(response: &Response, json_mode: bool) {
             println!("Running: {running}");
             println!("Instances: {instance_count}");
             println!("Tick(us): {tick_duration_us}");
+        }
+        Some(ResponseData::EnvSignals { signals }) => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["Instance", "Local ID", "Name", "Type", "Units"]);
+            for signal in signals {
+                table.add_row(vec![
+                    signal.instance.clone(),
+                    signal.local_id.to_string(),
+                    signal.name.clone(),
+                    signal.signal_type.to_string(),
+                    signal.units.clone().unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
+        }
+        Some(ResponseData::EnvSignalValues { values }) => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_HORIZONTAL_ONLY)
+                .set_header(vec!["Instance", "Local ID", "Name", "Type", "Value", "Units"]);
+            for signal in values {
+                table.add_row(vec![
+                    signal.instance.clone(),
+                    signal.local_id.to_string(),
+                    signal.name.clone(),
+                    signal.signal_type.to_string(),
+                    format!("{:?}", signal.value),
+                    signal.units.clone().unwrap_or_else(|| "-".to_string()),
+                ]);
+            }
+            println!("{table}");
         }
         Some(ResponseData::InstanceStatus {
             instance,

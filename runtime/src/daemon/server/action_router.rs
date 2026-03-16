@@ -4,7 +4,8 @@ use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
     CanBusData, InstanceAction, InstanceInfoData, ResponseData, SharedChannelData,
-    SharedSlotValueData, SignalData, SignalValueData, WorkerAction, parse_duration_us,
+    SharedSlotValueData, SignalData, SignalValueData, WorkerAction, WorkerSignalValueData,
+    parse_duration_us,
 };
 use crate::signal_selectors;
 use crate::shared::SharedRegion;
@@ -359,6 +360,10 @@ pub(super) async fn dispatch_worker_action(
             attach_can_bus(state, &bus_name, &vcan_iface)?;
             Ok(ResponseData::Ack)
         }
+        WorkerAction::ReadSignals { ids } => {
+            let values = read_signal_values_by_ids(state, &ids)?;
+            Ok(ResponseData::WorkerSignalValues { values })
+        }
         WorkerAction::CanDiscardPendingRx => {
             can_ops::discard_can_rx(state)?;
             Ok(ResponseData::Ack)
@@ -369,6 +374,40 @@ pub(super) async fn dispatch_worker_action(
             Ok(ResponseData::Ack)
         }
     }
+}
+
+fn read_signal_values_by_ids(
+    state: &DaemonState,
+    ids: &[u32],
+) -> Result<Vec<WorkerSignalValueData>, String> {
+    let signal_values = state.project.read_many(ids).map_err(|e| e.to_string())?;
+    if signal_values.len() != ids.len() {
+        return Err(format!(
+            "grouped signal read returned {} values for {} requested ids",
+            signal_values.len(),
+            ids.len()
+        ));
+    }
+
+    let mut values = Vec::with_capacity(signal_values.len());
+    for (id, value) in ids.iter().copied().zip(signal_values) {
+        let signal = state
+            .project
+            .signal_by_id(id)
+            .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
+        if signal.signal_type != value.signal_type() {
+            return Err(
+                SimError::TypeMismatch {
+                    name: signal.name.clone(),
+                    expected: signal.signal_type,
+                    actual: value.signal_type(),
+                }
+                .to_string(),
+            );
+        }
+        values.push(WorkerSignalValueData { id, value });
+    }
+    Ok(values)
 }
 
 fn read_selected_signal_values(

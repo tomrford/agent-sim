@@ -72,6 +72,15 @@ pub enum EnvCommand {
     Start {
         name: String,
     },
+    Signals {
+        name: String,
+        selectors: Vec<String>,
+    },
+    Get {
+        name: String,
+        #[arg(required = true)]
+        selectors: Vec<String>,
+    },
     Status {
         name: String,
     },

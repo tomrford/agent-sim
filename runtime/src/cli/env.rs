@@ -21,6 +21,33 @@ use uuid::Uuid;
 pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<ExitCode, CliError> {
     match &env.command {
         EnvCommand::Start { name } => run_env_start(args, name).await,
+        EnvCommand::Signals { name, selectors } => {
+            let selectors = if selectors.is_empty() {
+                vec!["*".to_string()]
+            } else {
+                selectors.clone()
+            };
+            run_env_action(
+                args,
+                name,
+                EnvAction::Signals {
+                    env: name.clone(),
+                    selectors,
+                },
+            )
+            .await
+        }
+        EnvCommand::Get { name, selectors } => {
+            run_env_action(
+                args,
+                name,
+                EnvAction::Get {
+                    env: name.clone(),
+                    selectors: selectors.clone(),
+                },
+            )
+            .await
+        }
         EnvCommand::Status { name } => {
             run_env_action(args, name, EnvAction::Status { env: name.clone() }).await
         }

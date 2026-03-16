@@ -17,6 +17,7 @@ type SimInitFn = unsafe extern "C" fn() -> u32;
 type SimResetFn = unsafe extern "C" fn() -> u32;
 type SimTickFn = unsafe extern "C" fn() -> u32;
 type SimReadValFn = unsafe extern "C" fn(u32, *mut SimValueRaw) -> u32;
+type SimReadValsFn = unsafe extern "C" fn(*const u32, *mut SimValueRaw, u32) -> u32;
 type SimWriteValFn = unsafe extern "C" fn(u32, *const SimValueRaw) -> u32;
 type SimGetSignalCountFn = unsafe extern "C" fn(*mut u32) -> u32;
 type SimGetSignalsFn = unsafe extern "C" fn(*mut SimSignalDescRaw, u32, *mut u32) -> u32;
@@ -74,6 +75,7 @@ pub struct Project {
     sim_reset: SimResetFn,
     sim_tick: SimTickFn,
     sim_read_val: SimReadValFn,
+    sim_read_vals: Option<SimReadValsFn>,
     sim_write_val: SimWriteValFn,
     _sim_get_signal_count: SimGetSignalCountFn,
     _sim_get_signals: SimGetSignalsFn,
@@ -100,6 +102,9 @@ impl Project {
             .map_err(|_| ProjectError::MissingSymbol("sim_tick"))?;
         let sim_read_val: SimReadValFn = *unsafe { library.get::<SimReadValFn>(b"sim_read_val\0") }
             .map_err(|_| ProjectError::MissingSymbol("sim_read_val"))?;
+        let sim_read_vals = unsafe { library.get::<SimReadValsFn>(b"sim_read_vals\0") }
+            .ok()
+            .map(|symbol| *symbol);
         let sim_write_val: SimWriteValFn =
             *unsafe { library.get::<SimWriteValFn>(b"sim_write_val\0") }
                 .map_err(|_| ProjectError::MissingSymbol("sim_write_val"))?;
@@ -332,6 +337,7 @@ impl Project {
             sim_reset,
             sim_tick,
             sim_read_val,
+            sim_read_vals,
             sim_write_val,
             _sim_get_signal_count: sim_get_signal_count,
             _sim_get_signals: sim_get_signals,
@@ -506,15 +512,55 @@ impl Project {
     }
 
     pub(crate) fn read(&self, signal: &SignalMeta) -> Result<SignalValue, SimError> {
-        let mut raw = SimValueRaw {
-            signal_type: 0,
-            data: crate::sim::types::SimValueDataRaw { u32: 0 },
-        };
-        let status = unsafe { (self.sim_read_val)(signal.id, &mut raw as *mut SimValueRaw) };
-        self.map_status(status, Some(signal), None)?;
-        let value = unsafe { SignalValue::from_raw(raw) }
-            .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))?;
-        Ok(value)
+        let mut values = self.read_many(&[signal.id])?;
+        values.pop().ok_or_else(|| {
+            SimError::FfiContract(format!(
+                "sim_read_vals returned no values for signal '{}'",
+                signal.name
+            ))
+        })
+    }
+
+    pub(crate) fn read_many(&self, ids: &[u32]) -> Result<Vec<SignalValue>, SimError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(sim_read_vals) = self.sim_read_vals {
+            let mut raws = vec![
+                SimValueRaw {
+                    signal_type: 0,
+                    data: crate::sim::types::SimValueDataRaw { u32: 0 },
+                };
+                ids.len()
+            ];
+            let status =
+                unsafe { sim_read_vals(ids.as_ptr(), raws.as_mut_ptr(), ids.len() as u32) };
+            self.map_status(status, None, None)?;
+            return raws
+                .into_iter()
+                .map(|raw| {
+                    unsafe { SignalValue::from_raw(raw) }
+                        .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))
+                })
+                .collect();
+        }
+
+        let mut values = Vec::with_capacity(ids.len());
+        for id in ids {
+            let signal = self
+                .signal_by_id(*id)
+                .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")))?;
+            let mut raw = SimValueRaw {
+                signal_type: 0,
+                data: crate::sim::types::SimValueDataRaw { u32: 0 },
+            };
+            let status = unsafe { (self.sim_read_val)(signal.id, &mut raw as *mut SimValueRaw) };
+            self.map_status(status, Some(signal), None)?;
+            let value = unsafe { SignalValue::from_raw(raw) }
+                .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))?;
+            values.push(value);
+        }
+        Ok(values)
     }
 
     pub(crate) fn write(&self, signal: &SignalMeta, value: &SignalValue) -> Result<(), SimError> {
