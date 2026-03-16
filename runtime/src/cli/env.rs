@@ -13,12 +13,14 @@ use crate::envd::spec::{
     EnvSharedChannelSpec, EnvSpec,
 };
 use crate::load::resolve::{canonicalize_runtime_path, resolve_env_load_specs};
+use crate::name::{validate_env_name, validate_instance_name};
 use crate::protocol::{EnvAction, Request, RequestAction};
 use std::path::Path;
 use std::process::ExitCode;
 use uuid::Uuid;
 
 pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<ExitCode, CliError> {
+    validate_env_name(env_command_name(&env.command)).map_err(CliError::CommandFailed)?;
     match &env.command {
         EnvCommand::Start { name } => run_env_start(args, name).await,
         EnvCommand::Signals { name, selectors } => {
@@ -162,6 +164,19 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
     }
 }
 
+fn env_command_name(command: &EnvCommand) -> &str {
+    match command {
+        EnvCommand::Start { name }
+        | EnvCommand::Signals { name, .. }
+        | EnvCommand::Get { name, .. }
+        | EnvCommand::Status { name }
+        | EnvCommand::Reset { name }
+        | EnvCommand::Time { name, .. }
+        | EnvCommand::Can { name, .. }
+        | EnvCommand::Trace { name, .. } => name,
+    }
+}
+
 fn resolve_trace_output_path(raw_path: &str) -> Result<String, CliError> {
     super::commands::absolutize_cli_path(raw_path, "trace output").map_err(CliError::CommandFailed)
 }
@@ -253,6 +268,10 @@ fn build_env_spec(
     devices: &std::collections::BTreeMap<String, crate::config::recipe::DeviceDef>,
     config_base_dir: Option<&Path>,
 ) -> Result<EnvSpec, CliError> {
+    validate_env_name(env_name).map_err(CliError::CommandFailed)?;
+    for instance in &env_def.instances {
+        validate_instance_name(&instance.name).map_err(CliError::CommandFailed)?;
+    }
     let load_specs = resolve_env_load_specs(env_name, &env_def.instances, devices, config_base_dir)
         .map_err(|err| CliError::CommandFailed(err.to_string()))?;
     let instances = load_specs
@@ -327,11 +346,13 @@ fn parse_env_member(member: &str, default_bus_name: &str) -> Result<(String, Str
                 "invalid env bus member '{member}'"
             )));
         }
+        validate_instance_name(session_name).map_err(CliError::CommandFailed)?;
         return Ok((session_name.to_string(), bus_name.to_string()));
     }
     if member.is_empty() {
         return Err(CliError::CommandFailed("empty env bus member".to_string()));
     }
+    validate_instance_name(member).map_err(CliError::CommandFailed)?;
     Ok((member.to_string(), default_bus_name.to_string()))
 }
 
@@ -357,7 +378,7 @@ async fn run_env_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_config_relative_path, resolve_trace_output_path};
+    use super::{parse_env_member, resolve_config_relative_path, resolve_trace_output_path};
     use crate::cli::error::CliError;
     use std::path::Path;
     #[test]
@@ -420,5 +441,15 @@ mod tests {
             Path::new(&resolved).is_absolute(),
             "trace output path should be absolute: {resolved}"
         );
+    }
+
+    #[test]
+    fn parse_env_member_rejects_invalid_instance_name() {
+        let err =
+            parse_env_member("inst.a:bus0", "default").expect_err("invalid name must fail");
+        let CliError::CommandFailed(message) = err else {
+            panic!("expected command failure for invalid env member");
+        };
+        assert!(message.contains("expected [A-Za-z0-9_-]+"));
     }
 }

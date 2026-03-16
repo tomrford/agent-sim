@@ -16,6 +16,7 @@ use crate::load::resolve::resolve_standalone_load_spec;
 use crate::protocol::{
     EnvAction, InstanceAction, Request, RequestAction, Response, ResponseData, SignalValueData,
 };
+use crate::{name::validate_instance_name, name::validate_env_name};
 use std::path::Path;
 use std::process::ExitCode;
 use tokio::time::{Duration, sleep};
@@ -35,6 +36,9 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
     let Some(command) = args.command.as_ref() else {
         return Err(CliError::MissingCommand);
     };
+    if command_uses_instance_session(command) {
+        validate_instance_name(&args.instance).map_err(CliError::CommandFailed)?;
+    }
 
     match command {
         Command::Load(load) => run_load_command(&args, load).await,
@@ -121,6 +125,7 @@ async fn run_load_command(
 
 async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
     if let Some(env_name) = &close.env {
+        validate_env_name(env_name).map_err(CliError::CommandFailed)?;
         close_env_and_wait(env_name).await?;
         return Ok(ExitCode::SUCCESS);
     }
@@ -165,6 +170,50 @@ async fn run_close_command(close: &CloseArgs) -> Result<ExitCode, CliError> {
         )));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn command_uses_instance_session(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Env(_) | Command::Close(CloseArgs { all: true, .. })
+    ) && !matches!(
+        command,
+        Command::Close(CloseArgs {
+            env: Some(_),
+            all: _,
+        })
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_uses_instance_session;
+    use crate::cli::args::{CloseArgs, Command, EnvArgs, EnvCommand};
+
+    #[test]
+    fn command_uses_instance_session_skips_env_and_global_close_commands() {
+        assert!(!command_uses_instance_session(&Command::Env(EnvArgs {
+            command: EnvCommand::Status {
+                name: "demo".to_string(),
+            },
+        })));
+        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
+            all: true,
+            env: None,
+        })));
+        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
+            all: false,
+            env: Some("demo".to_string()),
+        })));
+    }
+
+    #[test]
+    fn command_uses_instance_session_for_instance_close() {
+        assert!(command_uses_instance_session(&Command::Close(CloseArgs {
+            all: false,
+            env: None,
+        })));
+    }
 }
 
 async fn close_env_and_wait(env_name: &str) -> Result<(), CliError> {

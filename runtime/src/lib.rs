@@ -8,6 +8,7 @@ pub mod error;
 pub mod internal_cli;
 pub mod ipc;
 pub mod load;
+pub mod name;
 pub mod process;
 pub mod protocol;
 pub mod shared;

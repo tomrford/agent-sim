@@ -3,6 +3,7 @@ use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::daemon::lifecycle::{bootstrap_daemon_with_exe, kill_pid, read_pid};
 use crate::envd::spec::{EnvInstanceSpec, EnvSpec};
+use crate::name::{validate_env_name, validate_instance_name};
 use crate::protocol::{CanBusData, InstanceAction, ResponseData, SignalData, WorkerAction};
 use crate::signal_selectors::{EnvSignalCatalog, EnvSignalCatalogEntry};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -22,6 +23,21 @@ fn validate_env_tick_duration_us(
 
 impl EnvState {
     pub(super) async fn bootstrap(socket_path: PathBuf, env_spec: EnvSpec) -> Result<Self, String> {
+        validate_env_name(&env_spec.name)?;
+        for instance in &env_spec.instances {
+            validate_instance_name(&instance.name)?;
+        }
+        for can_bus in &env_spec.can_buses {
+            for member in &can_bus.members {
+                validate_instance_name(&member.instance_name)?;
+            }
+        }
+        for shared in &env_spec.shared_channels {
+            validate_instance_name(&shared.writer_instance)?;
+            for member in &shared.members {
+                validate_instance_name(&member.instance_name)?;
+            }
+        }
         tracing::info!(
             "bootstrapping env '{}' with {} instance(s)",
             env_spec.name,
