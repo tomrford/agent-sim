@@ -445,8 +445,7 @@ mod tests {
 
     #[test]
     fn parse_env_member_rejects_invalid_instance_name() {
-        let err =
-            parse_env_member("inst.a:bus0", "default").expect_err("invalid name must fail");
+        let err = parse_env_member("inst.a:bus0", "default").expect_err("invalid name must fail");
         let CliError::CommandFailed(message) = err else {
             panic!("expected command failure for invalid env member");
         };

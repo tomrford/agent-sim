@@ -53,8 +53,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         },
         Command::Trace(trace) => match &trace.command {
             TraceCommand::Start { path, period } => InstanceAction::TraceStart {
-                path: absolutize_cli_path(path, "trace output")
-                    .map_err(CliError::CommandFailed)?,
+                path: absolutize_cli_path(path, "trace output").map_err(CliError::CommandFailed)?,
                 period: period.clone(),
             },
             TraceCommand::Stop => InstanceAction::TraceStop,
@@ -317,14 +316,9 @@ mod tests {
 
     #[test]
     fn trace_start_request_absolutizes_output_path() {
-        let args = CliArgs::try_parse_from([
-            "agent-sim",
-            "trace",
-            "start",
-            "trace-output.csv",
-            "1ms",
-        ])
-        .expect("trace command should parse");
+        let args =
+            CliArgs::try_parse_from(["agent-sim", "trace", "start", "trace-output.csv", "1ms"])
+                .expect("trace command should parse");
         let request = to_request(&args).expect("trace start request should build");
         let RequestAction::Instance(InstanceAction::TraceStart { path, period }) = request.action
         else {

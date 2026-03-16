@@ -16,7 +16,7 @@ use crate::load::resolve::resolve_standalone_load_spec;
 use crate::protocol::{
     EnvAction, InstanceAction, Request, RequestAction, Response, ResponseData, SignalValueData,
 };
-use crate::{name::validate_instance_name, name::validate_env_name};
+use crate::{name::validate_env_name, name::validate_instance_name};
 use std::path::Path;
 use std::process::ExitCode;
 use tokio::time::{Duration, sleep};
