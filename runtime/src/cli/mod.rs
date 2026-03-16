@@ -185,37 +185,6 @@ fn command_uses_instance_session(command: &Command) -> bool {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::command_uses_instance_session;
-    use crate::cli::args::{CloseArgs, Command, EnvArgs, EnvCommand};
-
-    #[test]
-    fn command_uses_instance_session_skips_env_and_global_close_commands() {
-        assert!(!command_uses_instance_session(&Command::Env(EnvArgs {
-            command: EnvCommand::Status {
-                name: "demo".to_string(),
-            },
-        })));
-        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
-            all: true,
-            env: None,
-        })));
-        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
-            all: false,
-            env: Some("demo".to_string()),
-        })));
-    }
-
-    #[test]
-    fn command_uses_instance_session_for_instance_close() {
-        assert!(command_uses_instance_session(&Command::Close(CloseArgs {
-            all: false,
-            env: None,
-        })));
-    }
-}
-
 async fn close_env_and_wait(env_name: &str) -> Result<(), CliError> {
     let request = Request {
         id: Uuid::new_v4(),
@@ -313,4 +282,35 @@ pub(crate) fn response_error(response: &Response) -> String {
         .error
         .clone()
         .unwrap_or_else(|| "command failed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_uses_instance_session;
+    use crate::cli::args::{CloseArgs, Command, EnvArgs, EnvCommand};
+
+    #[test]
+    fn command_uses_instance_session_skips_env_and_global_close_commands() {
+        assert!(!command_uses_instance_session(&Command::Env(EnvArgs {
+            command: EnvCommand::Status {
+                name: "demo".to_string(),
+            },
+        })));
+        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
+            all: true,
+            env: None,
+        })));
+        assert!(!command_uses_instance_session(&Command::Close(CloseArgs {
+            all: false,
+            env: Some("demo".to_string()),
+        })));
+    }
+
+    #[test]
+    fn command_uses_instance_session_for_instance_close() {
+        assert!(command_uses_instance_session(&Command::Close(CloseArgs {
+            all: false,
+            env: None,
+        })));
+    }
 }
