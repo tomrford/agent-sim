@@ -262,6 +262,13 @@ impl EnvState {
             time: crate::sim::time::TimeEngine::default(),
             realtime_tick_backlog: 0,
             can_buses,
+            trace: super::EnvTraceState {
+                active: None,
+                last_path: None,
+                last_row_count: 0,
+                last_signal_count: 0,
+                last_period_us: None,
+            },
             shutdown: false,
         })
     }

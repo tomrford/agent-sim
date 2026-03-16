@@ -48,6 +48,13 @@ pub enum InstanceAction {
     Set {
         writes: BTreeMap<String, String>,
     },
+    TraceStart {
+        path: String,
+        period: String,
+    },
+    TraceStop,
+    TraceClear,
+    TraceStatus,
     TimeStart,
     TimePause,
     TimeStep {
@@ -183,6 +190,20 @@ pub enum EnvAction {
         env: String,
         bus_name: Option<String>,
     },
+    TraceStart {
+        env: String,
+        path: String,
+        period: String,
+    },
+    TraceStop {
+        env: String,
+    },
+    TraceClear {
+        env: String,
+    },
+    TraceStatus {
+        env: String,
+    },
     Signals {
         env: String,
         selectors: Vec<String>,
@@ -296,8 +317,12 @@ pub enum ResponseData {
         channel: String,
         slots: Vec<SharedSlotValueData>,
     },
-    WatchSamples {
-        samples: Vec<WatchSampleData>,
+    TraceStatus {
+        active: bool,
+        path: Option<String>,
+        row_count: u64,
+        signal_count: usize,
+        period_us: Option<u64>,
     },
     RecipeResult {
         recipe: String,
@@ -348,14 +373,6 @@ pub struct SignalValueData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerSignalValueData {
     pub id: u32,
-    pub value: SignalValue,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchSampleData {
-    pub tick: u64,
-    pub time_us: u64,
-    pub signal: String,
     pub value: SignalValue,
 }
 

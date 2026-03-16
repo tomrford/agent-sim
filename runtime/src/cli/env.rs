@@ -1,6 +1,7 @@
 use super::response_error;
 use crate::cli::args::{
     CliArgs, EnvArgs, EnvCanCommand, EnvCanScheduleCommand, EnvCommand, TimeCommand,
+    TraceCommand,
 };
 use crate::cli::error::CliError;
 use crate::config::load_config;
@@ -143,6 +144,19 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
                         bus_name: bus.clone(),
                     },
                 },
+            };
+            run_env_action(args, name, action).await
+        }
+        EnvCommand::Trace { name, command } => {
+            let action = match command {
+                TraceCommand::Start { path, period } => EnvAction::TraceStart {
+                    env: name.clone(),
+                    path: path.clone(),
+                    period: period.clone(),
+                },
+                TraceCommand::Stop => EnvAction::TraceStop { env: name.clone() },
+                TraceCommand::Clear => EnvAction::TraceClear { env: name.clone() },
+                TraceCommand::Status => EnvAction::TraceStatus { env: name.clone() },
             };
             run_env_action(args, name, action).await
         }

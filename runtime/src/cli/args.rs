@@ -38,7 +38,7 @@ pub enum Command {
     Reset,
     Get(GetArgs),
     Set(SetArgs),
-    Watch(WatchArgs),
+    Trace(TraceArgs),
     Run(RunArgs),
     Close(CloseArgs),
     Env(EnvArgs),
@@ -96,6 +96,11 @@ pub enum EnvCommand {
         name: String,
         #[command(subcommand)]
         command: EnvCanCommand,
+    },
+    Trace {
+        name: String,
+        #[command(subcommand)]
+        command: TraceCommand,
     },
 }
 
@@ -224,6 +229,20 @@ pub enum TimeCommand {
 }
 
 #[derive(Debug, Args)]
+pub struct TraceArgs {
+    #[command(subcommand)]
+    pub command: TraceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TraceCommand {
+    Start { path: String, period: String },
+    Stop,
+    Clear,
+    Status,
+}
+
+#[derive(Debug, Args)]
 pub struct GetArgs {
     #[arg(required = true)]
     pub selectors: Vec<String>,
@@ -270,15 +289,39 @@ mod tests {
         assert_eq!(name, "demo-env");
         assert_eq!(job_id, "job-1");
     }
-}
 
-#[derive(Debug, Args)]
-pub struct WatchArgs {
-    pub selector: String,
-    #[arg(default_value_t = 200)]
-    pub interval_ms: u64,
-    #[arg(long)]
-    pub samples: Option<u32>,
+    #[test]
+    fn env_trace_start_parses() {
+        let args = CliArgs::try_parse_from([
+            "agent-sim",
+            "env",
+            "trace",
+            "demo-env",
+            "start",
+            "out.csv",
+            "1ms",
+        ])
+        .expect("env trace start command should parse");
+
+        let Some(Command::Env(EnvArgs {
+            command:
+                EnvCommand::Trace {
+                    name,
+                    command:
+                        TraceCommand::Start {
+                            path,
+                            period,
+                        },
+                },
+        })) = args.command
+        else {
+            panic!("expected env trace start command");
+        };
+
+        assert_eq!(name, "demo-env");
+        assert_eq!(path, "out.csv");
+        assert_eq!(period, "1ms");
+    }
 }
 
 #[derive(Debug, Args)]

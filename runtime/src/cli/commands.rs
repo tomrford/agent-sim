@@ -1,5 +1,6 @@
 use crate::cli::args::{
     CanCommand, CliArgs, Command, InstanceCommand, SetArgs, SharedCommand, TimeCommand,
+    TraceCommand,
 };
 use crate::cli::error::CliError;
 use crate::protocol::{InstanceAction, Request, RequestAction};
@@ -50,6 +51,15 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         Command::Set(set) => InstanceAction::Set {
             writes: parse_set_entries(set)?,
         },
+        Command::Trace(trace) => match &trace.command {
+            TraceCommand::Start { path, period } => InstanceAction::TraceStart {
+                path: path.clone(),
+                period: period.clone(),
+            },
+            TraceCommand::Stop => InstanceAction::TraceStop,
+            TraceCommand::Clear => InstanceAction::TraceClear,
+            TraceCommand::Status => InstanceAction::TraceStatus,
+        },
         Command::Close(close) if !close.all && close.env.is_none() => InstanceAction::Close,
         Command::Instance(instance) => match instance.command {
             Some(InstanceCommand::List) => InstanceAction::InstanceList,
@@ -67,7 +77,6 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             TimeCommand::Status => InstanceAction::TimeStatus,
         },
         Command::Load(_)
-        | Command::Watch(_)
         | Command::Run(_)
         | Command::Env(_)
         | Command::Close(_) => {

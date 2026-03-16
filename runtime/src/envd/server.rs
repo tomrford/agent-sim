@@ -21,6 +21,7 @@ use crate::sim::time::TimeEngine;
 #[cfg(test)]
 use crate::sim::types::CAN_FLAG_EXTENDED;
 use crate::sim::types::SimCanFrame;
+use crate::trace::CsvTraceWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
@@ -41,6 +42,7 @@ struct EnvState {
     time: TimeEngine,
     realtime_tick_backlog: u64,
     can_buses: BTreeMap<String, EnvCanBusState>,
+    trace: EnvTraceState,
     shutdown: bool,
 }
 
@@ -66,6 +68,29 @@ struct CanScheduleJob {
     every_ticks: u64,
     next_due_tick: u64,
     enabled: bool,
+}
+
+struct EnvTraceState {
+    active: Option<ActiveEnvTrace>,
+    last_path: Option<PathBuf>,
+    last_row_count: u64,
+    last_signal_count: usize,
+    last_period_us: Option<u64>,
+}
+
+struct ActiveEnvTrace {
+    writer: CsvTraceWriter,
+    period_ticks: u64,
+    period_us: u64,
+    next_due_tick: u64,
+    signals: Vec<EnvTraceSignal>,
+}
+
+#[derive(Clone)]
+struct EnvTraceSignal {
+    instance: String,
+    local_id: u32,
+    name: String,
 }
 
 struct ActionMessage {
@@ -604,6 +629,13 @@ mod tests {
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,
             can_buses: BTreeMap::new(),
+            trace: EnvTraceState {
+                active: None,
+                last_path: None,
+                last_row_count: 0,
+                last_signal_count: 0,
+                last_period_us: None,
+            },
             shutdown: false,
         };
 
@@ -689,6 +721,13 @@ mod tests {
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,
             can_buses: BTreeMap::new(),
+            trace: EnvTraceState {
+                active: None,
+                last_path: None,
+                last_row_count: 0,
+                last_signal_count: 0,
+                last_period_us: None,
+            },
             shutdown: false,
         };
 
@@ -811,6 +850,13 @@ mod tests {
             time: TimeEngine::default(),
             realtime_tick_backlog: 0,
             can_buses: BTreeMap::new(),
+            trace: EnvTraceState {
+                active: None,
+                last_path: None,
+                last_row_count: 0,
+                last_signal_count: 0,
+                last_period_us: None,
+            },
             shutdown: false,
         };
 

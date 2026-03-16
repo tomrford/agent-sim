@@ -88,18 +88,14 @@ async fn process_action_batch(
 }
 
 fn advance_project_ticks(state: &mut DaemonState, ticks: u64) -> Result<(), String> {
-    let mut processed = 0_u64;
     for _ in 0..ticks {
         if let Err(err) = advance_single_project_tick(state) {
-            state.time.advance_ticks(if err.advance_tick() {
-                processed.saturating_add(1)
-            } else {
-                processed
-            });
+            if err.advance_tick() {
+                state.time.advance_ticks(1);
+            }
             return Err(err.into_message());
         }
-        processed = processed.saturating_add(1);
+        state.time.advance_ticks(1);
     }
-    state.time.advance_ticks(processed);
     Ok(())
 }

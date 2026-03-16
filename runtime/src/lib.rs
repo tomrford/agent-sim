@@ -13,3 +13,4 @@ pub mod protocol;
 pub mod signal_selectors;
 pub mod shared;
 pub mod sim;
+pub mod trace;

@@ -25,6 +25,7 @@ Key rules:
 - Serialize calls into a loaded DLL (not thread-safe).
 - Signal IDs/types are discovered at runtime — never hardcode across builds.
 - Use `sim_get_tick_duration_us` for the tick quantum; don't assume a fixed value.
+- Optional but recommended: export `sim_read_vals(ids, out, count)` for efficient batch reads.
 - Shared-state channels are dense snapshots:
   - `slot_count` is the full snapshot size
   - valid slot ids are exactly `0 .. slot_count-1`

@@ -1,24 +1,8 @@
 use crate::protocol::{Response, ResponseData};
 use comfy_table::{ContentArrangement, Table, presets::UTF8_HORIZONTAL_ONLY};
-use serde_json::json;
 
 pub fn print_response(response: &Response, json_mode: bool) {
     if json_mode {
-        if let Some(ResponseData::WatchSamples { samples }) = &response.data {
-            for sample in samples {
-                let line = json!({
-                    "tick": sample.tick,
-                    "time_us": sample.time_us,
-                    "name": sample.signal,
-                    "value": sample.value
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string())
-                );
-            }
-            return;
-        }
         println!(
             "{}",
             serde_json::to_string(response).unwrap_or_else(|_| {
@@ -248,13 +232,23 @@ pub fn print_response(response: &Response, json_mode: bool) {
             }
             println!("{table}");
         }
-        Some(ResponseData::WatchSamples { samples }) => {
-            for sample in samples {
-                println!(
-                    "tick={} time_us={} {}={:?}",
-                    sample.tick, sample.time_us, sample.signal, sample.value
-                );
-            }
+        Some(ResponseData::TraceStatus {
+            active,
+            path,
+            row_count,
+            signal_count,
+            period_us,
+        }) => {
+            println!("Active: {active}");
+            println!("Path: {}", path.clone().unwrap_or_else(|| "-".to_string()));
+            println!("Rows: {row_count}");
+            println!("Signals: {signal_count}");
+            println!(
+                "Period(us): {}",
+                period_us
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            );
         }
         Some(ResponseData::RecipeResult {
             recipe,

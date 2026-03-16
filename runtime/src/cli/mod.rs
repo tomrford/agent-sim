@@ -5,7 +5,7 @@ pub mod error;
 pub mod output;
 mod recipe;
 
-use crate::cli::args::{CliArgs, CloseArgs, Command, WatchArgs};
+use crate::cli::args::{CliArgs, CloseArgs, Command};
 use crate::cli::commands::to_request;
 use crate::cli::error::CliError;
 use crate::config::load_config;
@@ -15,7 +15,6 @@ use crate::envd::lifecycle as env_lifecycle;
 use crate::load::resolve::resolve_standalone_load_spec;
 use crate::protocol::{
     EnvAction, InstanceAction, Request, RequestAction, Response, ResponseData, SignalValueData,
-    WatchSampleData,
 };
 use std::path::Path;
 use std::process::ExitCode;
@@ -39,7 +38,6 @@ async fn run_inner(args: CliArgs) -> Result<ExitCode, CliError> {
 
     match command {
         Command::Load(load) => run_load_command(&args, load).await,
-        Command::Watch(watch) => run_watch_command(&args, watch).await,
         Command::Run(run) => recipe::run_recipe_command(&args, run).await,
         Command::Close(close) if close.all || close.env.is_some() => run_close_command(close).await,
         Command::Close(_) => run_instance_close_command(&args.instance).await,
@@ -117,28 +115,6 @@ async fn run_load_command(
             signal_count,
         },
     );
-    output::print_response(&response, args.json);
-    Ok(ExitCode::SUCCESS)
-}
-
-async fn run_watch_command(args: &CliArgs, watch: &WatchArgs) -> Result<ExitCode, CliError> {
-    let count = watch.samples.unwrap_or(10).max(1);
-    let mut samples = Vec::with_capacity(count as usize);
-    for idx in 0..count {
-        let (tick, time_us, signal_value) =
-            fetch_signal_sample(&args.instance, &watch.selector).await?;
-        samples.push(WatchSampleData {
-            tick,
-            time_us,
-            signal: signal_value.name,
-            value: signal_value.value,
-        });
-        if idx + 1 < count {
-            sleep(Duration::from_millis(watch.interval_ms.max(1))).await;
-        }
-    }
-
-    let response = Response::ok(Uuid::new_v4(), ResponseData::WatchSamples { samples });
     output::print_response(&response, args.json);
     Ok(ExitCode::SUCCESS)
 }

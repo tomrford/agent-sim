@@ -54,6 +54,8 @@ pub(super) async fn advance_single_tick(state: &mut EnvState) -> Result<(), Stri
         }
     }
     observe_env_bus_frames(state)?;
+    let sample_tick = current_tick.saturating_add(1);
+    super::dispatch::sample_env_trace_after_tick(state, sample_tick).await?;
 
     state.time.advance_ticks(1);
     Ok(())
