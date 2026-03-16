@@ -452,6 +452,12 @@ async fn start_env_trace(state: &mut EnvState, path: &str, period: &str) -> Resu
     if state.trace.active.is_some() {
         return Err("trace is already active; stop or clear it first".to_string());
     }
+    if !std::path::Path::new(path).is_absolute() {
+        return Err(format!(
+            "trace output path must be absolute, got '{}'",
+            path
+        ));
+    }
 
     let period_us = crate::protocol::parse_duration_us(period).map_err(|err| err.to_string())?;
     if period_us == 0 {

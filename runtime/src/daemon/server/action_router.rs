@@ -551,6 +551,12 @@ fn start_instance_trace(state: &mut DaemonState, path: &str, period: &str) -> Re
     if state.trace.active.is_some() {
         return Err("trace is already active; stop or clear it first".to_string());
     }
+    if !Path::new(path).is_absolute() {
+        return Err(format!(
+            "trace output path must be absolute, got '{}'",
+            path
+        ));
+    }
     let period_us = parse_duration_us(period).map_err(|err| err.to_string())?;
     if period_us == 0 {
         return Err("trace period must be greater than zero".to_string());

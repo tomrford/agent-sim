@@ -53,7 +53,8 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
         },
         Command::Trace(trace) => match &trace.command {
             TraceCommand::Start { path, period } => InstanceAction::TraceStart {
-                path: path.clone(),
+                path: absolutize_cli_path(path, "trace output")
+                    .map_err(CliError::CommandFailed)?,
                 period: period.clone(),
             },
             TraceCommand::Stop => InstanceAction::TraceStop,
@@ -108,6 +109,22 @@ fn canonicalize_cli_path(raw_path: &str) -> Result<String, CliError> {
         ))
     })?;
     Ok(canonical.to_string_lossy().into_owned())
+}
+
+pub(crate) fn absolutize_cli_path(raw_path: &str, kind: &str) -> Result<String, String> {
+    let path = Path::new(raw_path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                format!(
+                    "failed to determine current working directory while resolving {kind} path '{raw_path}': {err}"
+                )
+            })?
+            .join(path)
+    };
+    Ok(absolute.to_string_lossy().into_owned())
 }
 
 pub(crate) fn parse_arb_id(value: &str) -> Result<u32, CliError> {
@@ -170,6 +187,7 @@ fn parse_set_entries(args: &SetArgs) -> Result<BTreeMap<String, String>, CliErro
 mod tests {
     use super::*;
     use crate::cli::args::{CanArgs, CliArgs, Command, LoadArgs};
+    use clap::Parser;
 
     #[test]
     fn set_parser_accepts_single_pair() {
@@ -295,5 +313,27 @@ mod tests {
         };
         let err = to_request(&args).expect_err("load request should be rejected");
         assert!(matches!(err, CliError::CommandFailed(_)));
+    }
+
+    #[test]
+    fn trace_start_request_absolutizes_output_path() {
+        let args = CliArgs::try_parse_from([
+            "agent-sim",
+            "trace",
+            "start",
+            "trace-output.csv",
+            "1ms",
+        ])
+        .expect("trace command should parse");
+        let request = to_request(&args).expect("trace start request should build");
+        let RequestAction::Instance(InstanceAction::TraceStart { path, period }) = request.action
+        else {
+            panic!("expected trace start action");
+        };
+        assert_eq!(period, "1ms");
+        assert!(
+            Path::new(&path).is_absolute(),
+            "trace output path should be absolute, got: {path}"
+        );
     }
 }

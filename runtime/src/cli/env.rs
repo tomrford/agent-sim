@@ -150,7 +150,7 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
             let action = match command {
                 TraceCommand::Start { path, period } => EnvAction::TraceStart {
                     env: name.clone(),
-                    path: path.clone(),
+                    path: resolve_trace_output_path(path)?,
                     period: period.clone(),
                 },
                 TraceCommand::Stop => EnvAction::TraceStop { env: name.clone() },
@@ -160,6 +160,10 @@ pub(crate) async fn run_env_command(args: &CliArgs, env: &EnvArgs) -> Result<Exi
             run_env_action(args, name, action).await
         }
     }
+}
+
+fn resolve_trace_output_path(raw_path: &str) -> Result<String, CliError> {
+    super::commands::absolutize_cli_path(raw_path, "trace output").map_err(CliError::CommandFailed)
 }
 
 async fn run_env_start(args: &CliArgs, env_name: &str) -> Result<ExitCode, CliError> {
@@ -353,8 +357,9 @@ async fn run_env_action(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_config_relative_path;
+    use super::{resolve_config_relative_path, resolve_trace_output_path};
     use crate::cli::error::CliError;
+    use std::path::Path;
     #[test]
     fn resolve_config_relative_path_joins_relative_to_config_dir() {
         let temp = tempfile::tempdir().expect("tempdir should be creatable");
@@ -404,6 +409,16 @@ mod tests {
         assert!(
             message.contains("failed to resolve DBC path"),
             "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_trace_output_path_returns_absolute_path() {
+        let resolved =
+            resolve_trace_output_path("trace-output.csv").expect("trace path should resolve");
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "trace output path should be absolute: {resolved}"
         );
     }
 }
