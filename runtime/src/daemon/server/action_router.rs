@@ -6,6 +6,7 @@ use crate::protocol::{
     CanBusData, InstanceAction, InstanceInfoData, ResponseData, SharedChannelData,
     SharedSlotValueData, SignalData, SignalValueData, WorkerAction, parse_duration_us,
 };
+use crate::signal_selectors;
 use crate::shared::SharedRegion;
 use crate::sim::error::SimError;
 use std::path::Path;
@@ -74,8 +75,11 @@ pub(super) async fn dispatch_instance_action(
                 }
 
                 let ids =
-                    DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                    signal_selectors::select_instance_signal_ids(
+                        &state.project,
+                        std::slice::from_ref(&selector),
+                    )
+                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
                 for id in ids {
                     let signal = state
                         .project
@@ -377,7 +381,10 @@ fn read_selected_signal_values(
         if selector.starts_with("can.") {
             return Err(can_signal_projection_error());
         }
-        let ids = DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
+        let ids = signal_selectors::select_instance_signal_ids(
+            &state.project,
+            std::slice::from_ref(&selector),
+        )
             .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
         for id in ids {
             let signal = state

@@ -16,8 +16,7 @@ use crate::sim::error::SimError;
 use crate::sim::project::Project;
 use crate::sim::time::TimeEngine;
 use crate::sim::types::{SignalType, SignalValue, SimCanBusDesc, SimCanFrame, SimSharedDesc};
-use globset::{Glob, GlobMatcher};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, split};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -99,55 +98,6 @@ impl DaemonState {
                 .map_err(|_| SimError::InvalidArg(format!("invalid f64 value '{raw}'"))),
         }
     }
-
-    fn select_signal_ids(
-        project: &Project,
-        selectors: &[String],
-    ) -> Result<Vec<u32>, Box<dyn std::error::Error + Send + Sync>> {
-        if selectors.is_empty() {
-            return Err("missing signal selectors".into());
-        }
-        let mut ids = BTreeSet::new();
-        for selector in selectors {
-            if selector == "*" {
-                ids.extend(project.signals().iter().map(|s| s.id));
-                continue;
-            }
-            if let Some(raw_id) = selector.strip_prefix('#') {
-                let id = raw_id.parse::<u32>()?;
-                if project.signal_by_id(id).is_none() {
-                    return Err(format!("signal not found: '#{id}'").into());
-                }
-                ids.insert(id);
-                continue;
-            }
-            if selector.contains('*') || selector.contains('?') || selector.contains('[') {
-                let matcher = compile_glob(selector)?;
-                let mut matched = false;
-                for signal in project.signals() {
-                    if matcher.is_match(&signal.name) {
-                        ids.insert(signal.id);
-                        matched = true;
-                    }
-                }
-                if !matched {
-                    return Err(format!("signal glob matched nothing: '{selector}'").into());
-                }
-                continue;
-            }
-
-            if let Some(id) = project.signal_id_by_name(selector) {
-                ids.insert(id);
-            } else {
-                return Err(format!("signal not found: '{selector}'").into());
-            }
-        }
-        Ok(ids.into_iter().collect())
-    }
-}
-
-fn compile_glob(pattern: &str) -> Result<GlobMatcher, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(Glob::new(pattern)?.compile_matcher())
 }
 
 pub async fn run_listener(

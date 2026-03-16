@@ -10,5 +10,6 @@ pub mod ipc;
 pub mod load;
 pub mod process;
 pub mod protocol;
+pub mod signal_selectors;
 pub mod shared;
 pub mod sim;
