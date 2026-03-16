@@ -29,8 +29,7 @@ impl CsvTraceWriter {
             writer
                 .write_all(b",")
                 .map_err(|err| format!("failed to write trace header separator: {err}"))?;
-            writer
-                .write_all(header.as_bytes())
+            write_csv_cell(&mut writer, header)
                 .map_err(|err| format!("failed to write trace header entry '{header}': {err}"))?;
         }
         writer
@@ -56,7 +55,10 @@ impl CsvTraceWriter {
         write!(self.writer, "{tick},{time_us}")
             .map_err(|err| format!("failed to write trace row prefix: {err}"))?;
         for value in values {
-            write!(self.writer, ",{}", format_value(value))
+            self.writer
+                .write_all(b",")
+                .map_err(|err| format!("failed to write trace row separator: {err}"))?;
+            write_csv_cell(&mut self.writer, &format_value(value))
                 .map_err(|err| format!("failed to write trace row value: {err}"))?;
         }
         self.writer
@@ -85,5 +87,54 @@ fn format_value(value: &SignalValue) -> String {
         SignalValue::I32(value) => value.to_string(),
         SignalValue::F32(value) => value.to_string(),
         SignalValue::F64(value) => value.to_string(),
+    }
+}
+
+fn write_csv_cell(writer: &mut impl Write, value: &str) -> Result<(), String> {
+    writer
+        .write_all(escape_csv_cell(value).as_bytes())
+        .map_err(|err| format!("failed writing CSV cell: {err}"))
+}
+
+fn escape_csv_cell(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CsvTraceWriter, escape_csv_cell};
+
+    #[test]
+    fn escape_csv_cell_quotes_commas_quotes_and_newlines() {
+        assert_eq!(escape_csv_cell("simple"), "simple");
+        assert_eq!(escape_csv_cell("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv_cell("a\"b"), "\"a\"\"b\"");
+        assert_eq!(escape_csv_cell("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn create_escapes_header_cells() {
+        let temp_dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let trace_path = temp_dir.path().join("trace.csv");
+        let _writer = CsvTraceWriter::create(
+            &trace_path,
+            &[
+                "signal,one".to_string(),
+                "signal\"two".to_string(),
+                "signal-three".to_string(),
+            ],
+        )
+        .expect("trace writer should be creatable");
+
+        let content = std::fs::read_to_string(trace_path).expect("trace header should be readable");
+        let header = content.lines().next().expect("trace header should exist");
+        assert_eq!(
+            header,
+            "tick,time_us,\"signal,one\",\"signal\"\"two\",signal-three"
+        );
     }
 }
