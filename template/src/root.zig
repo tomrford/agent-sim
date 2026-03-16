@@ -50,6 +50,19 @@ pub export fn sim_read_val(id: u32, out: ?*SimValue) SimStatus {
     return adapter.read(ctx, id, out_val);
 }
 
+pub export fn sim_read_vals(ids: ?[*]const u32, out: ?[*]SimValue, count: u32) SimStatus {
+    const ctx = requireInitialized() orelse return .NOT_INITIALIZED;
+    if (count == 0) return .OK;
+    const read_ids = ids orelse return .INVALID_ARG;
+    const out_values = out orelse return .INVALID_ARG;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const status = adapter.read(ctx, read_ids[i], &out_values[i]);
+        if (status != .OK) return status;
+    }
+    return .OK;
+}
+
 pub export fn sim_write_val(id: u32, in: ?*const SimValue) SimStatus {
     const ctx = requireInitialized() orelse return .NOT_INITIALIZED;
     const in_val = in orelse return .INVALID_ARG;
