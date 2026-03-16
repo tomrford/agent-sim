@@ -97,9 +97,10 @@ instances = [
     let _ = run_agent(&["env", "trace", &env_name, "stop"]);
 
     let content = std::fs::read_to_string(&trace_path).expect("env trace csv should be readable");
-    let header = content
-        .lines()
-        .next()
+    let rows = content.lines().collect::<Vec<_>>();
+    let header = rows
+        .first()
+        .copied()
         .expect("env trace csv should contain a header row");
     assert!(
         header.contains(&format!("{instance}:demo.input")),
@@ -108,6 +109,21 @@ instances = [
     assert!(
         header.contains(&format!("{instance}:demo.output")),
         "missing qualified header entry: {header}"
+    );
+    let ticks = rows
+        .iter()
+        .skip(1)
+        .take(3)
+        .map(|row| {
+            row.split(',')
+                .next()
+                .expect("env trace row should include a tick column")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ticks,
+        vec!["0", "1", "2"],
+        "unexpected env trace ticks: {rows:?}"
     );
 
     let _ = run_agent(&["env", "trace", &env_name, "clear"]);

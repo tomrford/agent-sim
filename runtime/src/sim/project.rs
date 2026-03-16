@@ -512,13 +512,26 @@ impl Project {
     }
 
     pub(crate) fn read(&self, signal: &SignalMeta) -> Result<SignalValue, SimError> {
-        let mut values = self.read_many(&[signal.id])?;
-        values.pop().ok_or_else(|| {
-            SimError::FfiContract(format!(
-                "sim_read_vals returned no values for signal '{}'",
-                signal.name
-            ))
-        })
+        if let Some(sim_read_vals) = self.sim_read_vals {
+            let ids = [signal.id];
+            let mut raws = [SimValueRaw {
+                signal_type: 0,
+                data: crate::sim::types::SimValueDataRaw { u32: 0 },
+            }];
+            let status = unsafe { sim_read_vals(ids.as_ptr(), raws.as_mut_ptr(), 1) };
+            self.map_status(status, Some(signal), None)?;
+            return unsafe { SignalValue::from_raw(raws[0]) }
+                .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()));
+        }
+
+        let mut raw = SimValueRaw {
+            signal_type: 0,
+            data: crate::sim::types::SimValueDataRaw { u32: 0 },
+        };
+        let status = unsafe { (self.sim_read_val)(signal.id, &mut raw as *mut SimValueRaw) };
+        self.map_status(status, Some(signal), None)?;
+        unsafe { SignalValue::from_raw(raw) }
+            .ok_or_else(|| SimError::InvalidArg("bad read value".to_string()))
     }
 
     pub(crate) fn read_many(&self, ids: &[u32]) -> Result<Vec<SignalValue>, SimError> {

@@ -41,6 +41,21 @@ fn trace_lifecycle_writes_csv_and_clears_file() {
         "expected header plus sampled rows, got {} rows:\n{content}",
         rows.len()
     );
+    let ticks = rows
+        .iter()
+        .skip(1)
+        .take(4)
+        .map(|row| {
+            row.split(',')
+                .next()
+                .expect("trace row should include a tick column")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ticks,
+        vec!["0", "1", "2", "3"],
+        "unexpected trace ticks: {rows:?}"
+    );
 
     let _ = run_agent(&["--instance", &session, "trace", "clear"]);
     assert!(
