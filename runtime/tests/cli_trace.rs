@@ -23,7 +23,10 @@ fn trace_lifecycle_writes_csv_and_clears_file() {
     let _ = run_agent(&["--instance", &session, "trace", "stop"]);
 
     let status = run_agent(&["--instance", &session, "trace", "status"]);
-    assert!(status.contains("Active: false"), "unexpected status: {status}");
+    assert!(
+        status.contains("Active: false"),
+        "unexpected status: {status}"
+    );
     assert!(status.contains("Signals: 3"), "unexpected status: {status}");
 
     let content =

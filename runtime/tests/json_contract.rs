@@ -34,7 +34,10 @@ fn json_output_contract_and_trace_status() {
     let status: serde_json::Value =
         serde_json::from_str(status_json.trim()).expect("trace status should be valid json");
     assert_eq!(status["success"], serde_json::Value::Bool(true));
-    assert_eq!(status["data"]["kind"], serde_json::Value::String("trace_status".to_string()));
+    assert_eq!(
+        status["data"]["kind"],
+        serde_json::Value::String("trace_status".to_string())
+    );
     assert_eq!(
         status["data"]["value"]["active"],
         serde_json::Value::Bool(false)

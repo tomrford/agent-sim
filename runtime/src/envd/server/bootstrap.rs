@@ -103,13 +103,18 @@ impl EnvState {
             }
         }
 
-        tracing::info!("env '{}' phase: fetch instance signal catalogs", env_spec.name);
+        tracing::info!(
+            "env '{}' phase: fetch instance signal catalogs",
+            env_spec.name
+        );
         let mut pending_signals = Vec::with_capacity(env_spec.instances.len());
         for instance in &env_spec.instances {
             let worker = instance_workers
                 .get(&instance.name)
                 .ok_or_else(|| format!("missing env worker for instance '{}'", instance.name))?;
-            let response_rx = worker.begin_instance_request(InstanceAction::Signals).await?;
+            let response_rx = worker
+                .begin_instance_request(InstanceAction::Signals)
+                .await?;
             pending_signals.push((instance.name.clone(), response_rx));
         }
         for (instance_name, response_rx) in pending_signals {

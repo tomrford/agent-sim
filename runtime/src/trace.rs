@@ -87,4 +87,3 @@ fn format_value(value: &SignalValue) -> String {
         SignalValue::F64(value) => value.to_string(),
     }
 }
-

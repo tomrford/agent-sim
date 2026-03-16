@@ -137,9 +137,7 @@ fn stable_hash64(raw: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{
-        WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, pipe_name, stable_hash64,
-    };
+    use super::{WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, pipe_name, stable_hash64};
     #[cfg(windows)]
     use std::path::Path;
 

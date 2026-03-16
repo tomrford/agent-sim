@@ -22,9 +22,7 @@ pub struct EnvSignalCatalog {
 }
 
 impl EnvSignalCatalog {
-    pub fn build(
-        entries: impl IntoIterator<Item = EnvSignalCatalogEntry>,
-    ) -> Result<Self, String> {
+    pub fn build(entries: impl IntoIterator<Item = EnvSignalCatalogEntry>) -> Result<Self, String> {
         let mut sorted = entries.into_iter().collect::<Vec<_>>();
         sorted.sort_by(|lhs, rhs| lhs.qualified_name.cmp(&rhs.qualified_name));
 
@@ -196,4 +194,3 @@ fn string_matches(value: &str, selector: &str, glob: Option<&GlobMatcher>) -> bo
         value == selector
     }
 }
-

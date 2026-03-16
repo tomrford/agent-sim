@@ -307,11 +307,7 @@ mod tests {
             command:
                 EnvCommand::Trace {
                     name,
-                    command:
-                        TraceCommand::Start {
-                            path,
-                            period,
-                        },
+                    command: TraceCommand::Start { path, period },
                 },
         })) = args.command
         else {

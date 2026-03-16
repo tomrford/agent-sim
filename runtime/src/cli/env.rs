@@ -1,7 +1,6 @@
 use super::response_error;
 use crate::cli::args::{
-    CliArgs, EnvArgs, EnvCanCommand, EnvCanScheduleCommand, EnvCommand, TimeCommand,
-    TraceCommand,
+    CliArgs, EnvArgs, EnvCanCommand, EnvCanScheduleCommand, EnvCommand, TimeCommand, TraceCommand,
 };
 use crate::cli::error::CliError;
 use crate::config::load_config;

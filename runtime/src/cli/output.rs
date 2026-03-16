@@ -293,9 +293,9 @@ pub fn print_response(response: &Response, json_mode: bool) {
         }
         Some(ResponseData::EnvSignalValues { values }) => {
             let mut table = Table::new();
-            table
-                .load_preset(UTF8_HORIZONTAL_ONLY)
-                .set_header(vec!["Instance", "Local ID", "Name", "Type", "Value", "Units"]);
+            table.load_preset(UTF8_HORIZONTAL_ONLY).set_header(vec![
+                "Instance", "Local ID", "Name", "Type", "Value", "Units",
+            ]);
             for signal in values {
                 table.add_row(vec![
                     signal.instance.clone(),

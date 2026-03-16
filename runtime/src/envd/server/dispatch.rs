@@ -372,9 +372,9 @@ async fn read_env_signal_values(
         let response_rx = worker
             .begin_worker_request(WorkerAction::ReadSignals { ids: ids.clone() })
             .await?;
-        let response = response_rx
-            .await
-            .map_err(|_| format!("read-signals response channel closed for instance '{instance}'"))??;
+        let response = response_rx.await.map_err(|_| {
+            format!("read-signals response channel closed for instance '{instance}'")
+        })??;
         let ResponseData::WorkerSignalValues {
             values: worker_values,
         } = response
@@ -468,7 +468,10 @@ async fn start_env_trace(state: &mut EnvState, path: &str, period: &str) -> Resu
             name: entry.qualified_name.clone(),
         })
         .collect::<Vec<_>>();
-    let headers = signals.iter().map(|signal| signal.name.clone()).collect::<Vec<_>>();
+    let headers = signals
+        .iter()
+        .map(|signal| signal.name.clone())
+        .collect::<Vec<_>>();
 
     let status = state.time.status(state.tick_duration_us);
     let mut writer = crate::trace::CsvTraceWriter::create(path, &headers)?;
@@ -572,9 +575,9 @@ async fn read_env_trace_values(
         let response_rx = worker
             .begin_worker_request(WorkerAction::ReadSignals { ids: ids.clone() })
             .await?;
-        let response = response_rx
-            .await
-            .map_err(|_| format!("read-signals response channel closed for instance '{instance}'"))??;
+        let response = response_rx.await.map_err(|_| {
+            format!("read-signals response channel closed for instance '{instance}'")
+        })??;
         let ResponseData::WorkerSignalValues {
             values: worker_values,
         } = response

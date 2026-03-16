@@ -7,8 +7,8 @@ use crate::protocol::{
     SharedSlotValueData, SignalData, SignalValueData, WorkerAction, WorkerSignalValueData,
     parse_duration_us,
 };
-use crate::signal_selectors;
 use crate::shared::SharedRegion;
+use crate::signal_selectors;
 use crate::sim::error::SimError;
 use std::path::Path;
 
@@ -75,12 +75,11 @@ pub(super) async fn dispatch_instance_action(
                     return Err(can_signal_projection_error());
                 }
 
-                let ids =
-                    signal_selectors::select_instance_signal_ids(
-                        &state.project,
-                        std::slice::from_ref(&selector),
-                    )
-                    .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                let ids = signal_selectors::select_instance_signal_ids(
+                    &state.project,
+                    std::slice::from_ref(&selector),
+                )
+                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
                 for id in ids {
                     let signal = state
                         .project
@@ -409,14 +408,12 @@ fn read_signal_values_by_ids(
             .signal_by_id(id)
             .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
         if signal.signal_type != value.signal_type() {
-            return Err(
-                SimError::TypeMismatch {
-                    name: signal.name.clone(),
-                    expected: signal.signal_type,
-                    actual: value.signal_type(),
-                }
-                .to_string(),
-            );
+            return Err(SimError::TypeMismatch {
+                name: signal.name.clone(),
+                expected: signal.signal_type,
+                actual: value.signal_type(),
+            }
+            .to_string());
         }
         values.push(WorkerSignalValueData { id, value });
     }
@@ -437,7 +434,7 @@ fn read_selected_signal_values(
             &state.project,
             std::slice::from_ref(&selector),
         )
-            .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
         for id in ids {
             let signal = state
                 .project
@@ -575,7 +572,10 @@ fn start_instance_trace(state: &mut DaemonState, path: &str, period: &str) -> Re
 
     let status = state.time.status(state.project.tick_duration_us());
     let mut writer = crate::trace::CsvTraceWriter::create(path, &headers)?;
-    let values = state.project.read_many(&signal_ids).map_err(|e| e.to_string())?;
+    let values = state
+        .project
+        .read_many(&signal_ids)
+        .map_err(|e| e.to_string())?;
     writer.write_row(status.elapsed_ticks, status.elapsed_time_us, &values)?;
 
     state.trace.active = Some(super::ActiveDaemonTrace {

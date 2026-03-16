@@ -76,10 +76,7 @@ pub fn to_request(args: &CliArgs) -> Result<Request, CliError> {
             },
             TimeCommand::Status => InstanceAction::TimeStatus,
         },
-        Command::Load(_)
-        | Command::Run(_)
-        | Command::Env(_)
-        | Command::Close(_) => {
+        Command::Load(_) | Command::Run(_) | Command::Env(_) | Command::Close(_) => {
             return Err(CliError::CommandFailed(
                 "command is handled by the CLI executor".to_string(),
             ));
