@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive", "env"] }
 comfy-table = "7"
 dirs = "6"
 globset = "0.4"
+interprocess = { version = "2.4.0", features = ["tokio"] }
 libc = "0.2"
 libloading = "0.8"
 memmap2 = "0.9"

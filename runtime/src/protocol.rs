@@ -48,6 +48,13 @@ pub enum InstanceAction {
     Set {
         writes: BTreeMap<String, String>,
     },
+    TraceStart {
+        path: String,
+        period: String,
+    },
+    TraceStop,
+    TraceClear,
+    TraceStatus,
     TimeStart,
     TimePause,
     TimeStep {
@@ -97,6 +104,9 @@ pub enum WorkerAction {
     CanAttach {
         bus_name: String,
         vcan_iface: String,
+    },
+    ReadSignals {
+        ids: Vec<u32>,
     },
     CanDiscardPendingRx,
     Step,
@@ -180,6 +190,28 @@ pub enum EnvAction {
         env: String,
         bus_name: Option<String>,
     },
+    TraceStart {
+        env: String,
+        path: String,
+        period: String,
+    },
+    TraceStop {
+        env: String,
+    },
+    TraceClear {
+        env: String,
+    },
+    TraceStatus {
+        env: String,
+    },
+    Signals {
+        env: String,
+        selectors: Vec<String>,
+    },
+    Get {
+        env: String,
+        selectors: Vec<String>,
+    },
     Close {
         env: String,
     },
@@ -234,6 +266,9 @@ pub enum ResponseData {
     SignalValues {
         values: Vec<SignalValueData>,
     },
+    WorkerSignalValues {
+        values: Vec<WorkerSignalValueData>,
+    },
     SignalSample {
         tick: u64,
         time_us: u64,
@@ -282,8 +317,12 @@ pub enum ResponseData {
         channel: String,
         slots: Vec<SharedSlotValueData>,
     },
-    WatchSamples {
-        samples: Vec<WatchSampleData>,
+    TraceStatus {
+        active: bool,
+        path: Option<String>,
+        row_count: u64,
+        signal_count: usize,
+        period_us: Option<u64>,
     },
     RecipeResult {
         recipe: String,
@@ -296,6 +335,12 @@ pub enum ResponseData {
         running: bool,
         instance_count: usize,
         tick_duration_us: u32,
+    },
+    EnvSignals {
+        signals: Vec<EnvSignalData>,
+    },
+    EnvSignalValues {
+        values: Vec<EnvSignalValueData>,
     },
     InstanceStatus {
         instance: String,
@@ -326,11 +371,28 @@ pub struct SignalValueData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchSampleData {
-    pub tick: u64,
-    pub time_us: u64,
-    pub signal: String,
+pub struct WorkerSignalValueData {
+    pub id: u32,
     pub value: SignalValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSignalData {
+    pub instance: String,
+    pub local_id: u32,
+    pub name: String,
+    pub signal_type: SignalType,
+    pub units: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSignalValueData {
+    pub instance: String,
+    pub local_id: u32,
+    pub name: String,
+    pub signal_type: SignalType,
+    pub value: SignalValue,
+    pub units: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

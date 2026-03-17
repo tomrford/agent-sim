@@ -3,7 +3,9 @@ use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::daemon::lifecycle::{bootstrap_daemon_with_exe, kill_pid, read_pid};
 use crate::envd::spec::{EnvInstanceSpec, EnvSpec};
-use crate::protocol::{CanBusData, InstanceAction, ResponseData, WorkerAction};
+use crate::name::{validate_env_name, validate_instance_name};
+use crate::protocol::{CanBusData, InstanceAction, ResponseData, SignalData, WorkerAction};
+use crate::signal_selectors::{EnvSignalCatalog, EnvSignalCatalogEntry};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +23,21 @@ fn validate_env_tick_duration_us(
 
 impl EnvState {
     pub(super) async fn bootstrap(socket_path: PathBuf, env_spec: EnvSpec) -> Result<Self, String> {
+        validate_env_name(&env_spec.name)?;
+        for instance in &env_spec.instances {
+            validate_instance_name(&instance.name)?;
+        }
+        for can_bus in &env_spec.can_buses {
+            for member in &can_bus.members {
+                validate_instance_name(&member.instance_name)?;
+            }
+        }
+        for shared in &env_spec.shared_channels {
+            validate_instance_name(&shared.writer_instance)?;
+            for member in &shared.members {
+                validate_instance_name(&member.instance_name)?;
+            }
+        }
         tracing::info!(
             "bootstrapping env '{}' with {} instance(s)",
             env_spec.name,
@@ -42,6 +59,7 @@ impl EnvState {
         tracing::info!("env '{}' phase: bootstrap instances", env_spec.name);
         let mut tick_duration_us = None;
         let mut instance_can_buses: HashMap<String, Vec<CanBusData>> = HashMap::new();
+        let mut instance_signals: HashMap<String, Vec<SignalData>> = HashMap::new();
         let mut bootstrap_tasks = tokio::task::JoinSet::new();
         for instance in &env_spec.instances {
             let instance = instance.clone();
@@ -100,6 +118,35 @@ impl EnvState {
                 _ => {}
             }
         }
+
+        tracing::info!(
+            "env '{}' phase: fetch instance signal catalogs",
+            env_spec.name
+        );
+        let mut pending_signals = Vec::with_capacity(env_spec.instances.len());
+        for instance in &env_spec.instances {
+            let worker = instance_workers
+                .get(&instance.name)
+                .ok_or_else(|| format!("missing env worker for instance '{}'", instance.name))?;
+            let response_rx = worker
+                .begin_instance_request(InstanceAction::Signals)
+                .await?;
+            pending_signals.push((instance.name.clone(), response_rx));
+        }
+        for (instance_name, response_rx) in pending_signals {
+            let response = response_rx.await.map_err(|_| {
+                format!("signal-catalog response channel closed for instance '{instance_name}'")
+            })??;
+            let ResponseData::Signals { signals } = response else {
+                return Err(format!(
+                    "unexpected signal-catalog payload while bootstrapping instance '{}'",
+                    instance_name
+                ));
+            };
+            instance_signals.insert(instance_name, signals);
+        }
+
+        let signal_catalog = build_env_signal_catalog(&instance_signals)?;
 
         tracing::info!("env '{}' phase: fetch worker can buses", env_spec.name);
         let mut pending_can_buses = Vec::with_capacity(env_spec.instances.len());
@@ -231,13 +278,46 @@ impl EnvState {
                 .iter()
                 .map(|instance| instance.name.clone())
                 .collect(),
+            signal_catalog,
             instance_workers,
             time: crate::sim::time::TimeEngine::default(),
             realtime_tick_backlog: 0,
             can_buses,
+            trace: super::EnvTraceState {
+                active: None,
+                last_path: None,
+                last_row_count: 0,
+                last_signal_count: 0,
+                last_period_us: None,
+            },
             shutdown: false,
         })
     }
+}
+
+fn build_env_signal_catalog(
+    instance_signals: &HashMap<String, Vec<SignalData>>,
+) -> Result<EnvSignalCatalog, String> {
+    let mut entries = Vec::new();
+    for (instance, signals) in instance_signals {
+        for signal in signals {
+            if signal.name.contains(':') {
+                return Err(format!(
+                    "instance '{}' exposes signal '{}' with reserved ':'",
+                    instance, signal.name
+                ));
+            }
+            entries.push(EnvSignalCatalogEntry {
+                instance: instance.clone(),
+                local_id: signal.id,
+                signal_name: signal.name.clone(),
+                qualified_name: format!("{}:{}", instance, signal.name),
+                signal_type: signal.signal_type,
+                units: signal.units.clone(),
+            });
+        }
+    }
+    EnvSignalCatalog::build(entries)
 }
 
 pub(super) async fn attach_shared_channel(

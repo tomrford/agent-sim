@@ -4,9 +4,11 @@ use crate::can::CanSocket;
 use crate::can::dbc::DbcBusOverlay;
 use crate::protocol::{
     CanBusData, InstanceAction, InstanceInfoData, ResponseData, SharedChannelData,
-    SharedSlotValueData, SignalData, SignalValueData, WorkerAction, parse_duration_us,
+    SharedSlotValueData, SignalData, SignalValueData, WorkerAction, WorkerSignalValueData,
+    parse_duration_us,
 };
 use crate::shared::SharedRegion;
+use crate::signal_selectors;
 use crate::sim::error::SimError;
 use std::path::Path;
 
@@ -73,9 +75,11 @@ pub(super) async fn dispatch_instance_action(
                     return Err(can_signal_projection_error());
                 }
 
-                let ids =
-                    DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-                        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+                let ids = signal_selectors::select_instance_signal_ids(
+                    &state.project,
+                    std::slice::from_ref(&selector),
+                )
+                .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
                 for id in ids {
                     let signal = state
                         .project
@@ -94,6 +98,19 @@ pub(super) async fn dispatch_instance_action(
                 writes_applied: applied,
             })
         }
+        InstanceAction::TraceStart { path, period } => {
+            start_instance_trace(state, &path, &period)?;
+            Ok(trace_status_response(state))
+        }
+        InstanceAction::TraceStop => {
+            stop_instance_trace(state);
+            Ok(trace_status_response(state))
+        }
+        InstanceAction::TraceClear => {
+            clear_instance_trace(state)?;
+            Ok(trace_status_response(state))
+        }
+        InstanceAction::TraceStatus => Ok(trace_status_response(state)),
         InstanceAction::TimeStart => {
             reject_local_time_control(state)?;
             state.time.start().map_err(|e| e.to_string())?;
@@ -355,6 +372,10 @@ pub(super) async fn dispatch_worker_action(
             attach_can_bus(state, &bus_name, &vcan_iface)?;
             Ok(ResponseData::Ack)
         }
+        WorkerAction::ReadSignals { ids } => {
+            let values = read_signal_values_by_ids(state, &ids)?;
+            Ok(ResponseData::WorkerSignalValues { values })
+        }
         WorkerAction::CanDiscardPendingRx => {
             can_ops::discard_can_rx(state)?;
             Ok(ResponseData::Ack)
@@ -367,6 +388,38 @@ pub(super) async fn dispatch_worker_action(
     }
 }
 
+fn read_signal_values_by_ids(
+    state: &DaemonState,
+    ids: &[u32],
+) -> Result<Vec<WorkerSignalValueData>, String> {
+    let signal_values = state.project.read_many(ids).map_err(|e| e.to_string())?;
+    if signal_values.len() != ids.len() {
+        return Err(format!(
+            "grouped signal read returned {} values for {} requested ids",
+            signal_values.len(),
+            ids.len()
+        ));
+    }
+
+    let mut values = Vec::with_capacity(signal_values.len());
+    for (id, value) in ids.iter().copied().zip(signal_values) {
+        let signal = state
+            .project
+            .signal_by_id(id)
+            .ok_or_else(|| SimError::InvalidSignal(format!("#{id}")).to_string())?;
+        if signal.signal_type != value.signal_type() {
+            return Err(SimError::TypeMismatch {
+                name: signal.name.clone(),
+                expected: signal.signal_type,
+                actual: value.signal_type(),
+            }
+            .to_string());
+        }
+        values.push(WorkerSignalValueData { id, value });
+    }
+    Ok(values)
+}
+
 fn read_selected_signal_values(
     state: &DaemonState,
     selectors: Vec<String>,
@@ -377,8 +430,11 @@ fn read_selected_signal_values(
         if selector.starts_with("can.") {
             return Err(can_signal_projection_error());
         }
-        let ids = DaemonState::select_signal_ids(&state.project, std::slice::from_ref(&selector))
-            .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
+        let ids = signal_selectors::select_instance_signal_ids(
+            &state.project,
+            std::slice::from_ref(&selector),
+        )
+        .map_err(|e| SimError::InvalidSignal(e.to_string()).to_string())?;
         for id in ids {
             let signal = state
                 .project
@@ -399,19 +455,15 @@ fn read_selected_signal_values(
 }
 
 fn advance_project_ticks_for_request(state: &mut DaemonState, ticks: u64) -> Result<(), String> {
-    let mut processed = 0_u64;
     for _ in 0..ticks {
         if let Err(err) = advance_single_project_tick(state) {
-            state.time.advance_ticks(if err.advance_tick() {
-                processed.saturating_add(1)
-            } else {
-                processed
-            });
+            if err.advance_tick() {
+                state.time.advance_ticks(1);
+            }
             return Err(err.into_message());
         }
-        processed = processed.saturating_add(1);
+        state.time.advance_ticks(1);
     }
-    state.time.advance_ticks(processed);
     Ok(())
 }
 
@@ -422,6 +474,12 @@ pub(super) fn advance_single_project_tick(state: &mut DaemonState) -> Result<(),
         .project
         .tick()
         .map_err(|e| TickStepError::pre_tick(e.to_string()))?;
+    let sample_tick = state
+        .time
+        .status(state.project.tick_duration_us())
+        .elapsed_ticks
+        .saturating_add(1);
+    sample_instance_trace_after_tick(state, sample_tick).map_err(TickStepError::post_tick)?;
     can_ops::process_can_tx(state).map_err(TickStepError::post_tick)?;
     shared_ops::process_shared_tx(state).map_err(TickStepError::post_tick)?;
     Ok(())
@@ -492,4 +550,136 @@ fn local_can_control_error() -> String {
 fn can_signal_projection_error() -> String {
     "CAN signal projection is no longer supported; use `agent-sim env can <env> ...` instead"
         .to_string()
+}
+
+fn start_instance_trace(state: &mut DaemonState, path: &str, period: &str) -> Result<(), String> {
+    if state.trace.active.is_some() {
+        return Err("trace is already active; stop or clear it first".to_string());
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(format!(
+            "trace output path must be absolute, got '{}'",
+            path
+        ));
+    }
+    let period_us = parse_duration_us(period).map_err(|err| err.to_string())?;
+    if period_us == 0 {
+        return Err("trace period must be greater than zero".to_string());
+    }
+
+    let signal_ids = state
+        .project
+        .signals()
+        .iter()
+        .map(|signal| signal.id)
+        .collect::<Vec<_>>();
+    let headers = state
+        .project
+        .signals()
+        .iter()
+        .map(|signal| signal.name.clone())
+        .collect::<Vec<_>>();
+    let period_ticks = period_us.div_ceil(u64::from(state.project.tick_duration_us()));
+
+    let status = state.time.status(state.project.tick_duration_us());
+    let mut writer = crate::trace::CsvTraceWriter::create(path, &headers)?;
+    let values = state
+        .project
+        .read_many(&signal_ids)
+        .map_err(|e| e.to_string())?;
+    writer.write_row(status.elapsed_ticks, status.elapsed_time_us, &values)?;
+
+    state.trace.active = Some(super::ActiveDaemonTrace {
+        writer,
+        signal_ids,
+        period_ticks,
+        period_us,
+        next_due_tick: status.elapsed_ticks.saturating_add(period_ticks),
+    });
+    update_trace_history_from_active(state);
+    Ok(())
+}
+
+fn stop_instance_trace(state: &mut DaemonState) {
+    if let Some(active) = state.trace.active.take() {
+        state.trace.last_path = Some(active.writer.path().to_path_buf());
+        state.trace.last_row_count = active.writer.row_count();
+        state.trace.last_signal_count = active.signal_ids.len();
+        state.trace.last_period_us = Some(active.period_us);
+    }
+}
+
+fn clear_instance_trace(state: &mut DaemonState) -> Result<(), String> {
+    let path = if let Some(active) = state.trace.active.take() {
+        state.trace.last_row_count = active.writer.row_count();
+        Some(active.writer.path().to_path_buf())
+    } else {
+        state.trace.last_path.clone()
+    };
+    if let Some(path) = path
+        && path.exists()
+    {
+        std::fs::remove_file(&path)
+            .map_err(|err| format!("failed to remove trace file '{}': {err}", path.display()))?;
+    }
+    state.trace.last_path = None;
+    state.trace.last_row_count = 0;
+    state.trace.last_signal_count = 0;
+    state.trace.last_period_us = None;
+    Ok(())
+}
+
+fn trace_status_response(state: &DaemonState) -> ResponseData {
+    if let Some(active) = &state.trace.active {
+        ResponseData::TraceStatus {
+            active: true,
+            path: Some(active.writer.path().display().to_string()),
+            row_count: active.writer.row_count(),
+            signal_count: active.signal_ids.len(),
+            period_us: Some(active.period_us),
+        }
+    } else {
+        ResponseData::TraceStatus {
+            active: false,
+            path: state
+                .trace
+                .last_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            row_count: state.trace.last_row_count,
+            signal_count: state.trace.last_signal_count,
+            period_us: state.trace.last_period_us,
+        }
+    }
+}
+
+fn sample_instance_trace_after_tick(
+    state: &mut DaemonState,
+    sample_tick: u64,
+) -> Result<(), String> {
+    let Some(active) = &mut state.trace.active else {
+        return Ok(());
+    };
+    if sample_tick < active.next_due_tick {
+        return Ok(());
+    }
+
+    let time_us = sample_tick.saturating_mul(u64::from(state.project.tick_duration_us()));
+    let values = state
+        .project
+        .read_many(&active.signal_ids)
+        .map_err(|e| e.to_string())?;
+    active.writer.write_row(sample_tick, time_us, &values)?;
+    active.next_due_tick = sample_tick.saturating_add(active.period_ticks);
+    update_trace_history_from_active(state);
+    Ok(())
+}
+
+fn update_trace_history_from_active(state: &mut DaemonState) {
+    if let Some(active) = &state.trace.active {
+        state.trace.last_path = Some(active.writer.path().to_path_buf());
+        state.trace.last_row_count = active.writer.row_count();
+        state.trace.last_signal_count = active.signal_ids.len();
+        state.trace.last_period_us = Some(active.period_us);
+    }
 }

@@ -10,6 +10,7 @@ Use this when an autonomous agent needs to build, wire, and verify a DLL against
 - The runtime requires an exact `sim_get_api_version()` match before loading a DLL.
 - CAN and shared-state are optional, but if you export any symbol from an optional surface you must export the full surface.
 - Shared-state channels are **dense snapshots**, not sparse maps.
+- Batch signal reads are supported via optional `sim_read_vals`; runtime falls back to single-value reads when absent.
 
 ## Files that usually matter
 

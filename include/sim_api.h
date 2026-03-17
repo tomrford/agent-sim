@@ -157,6 +157,22 @@ SimStatus sim_tick(void);
 SimStatus sim_read_val(SignalId id, SimValue *out);
 
 /**
+ * @brief Read a batch of current signal values.
+ *
+ * Optional export:
+ * - host may prefer this over repeated sim_read_val() calls when available
+ * - host falls back to sim_read_val() when this symbol is absent
+ *
+ * Semantics:
+ * - count == 0 is valid and returns SIM_OK
+ * - ids[0..count) and out[0..count) must be dense arrays
+ * - output order must exactly match input id order
+ * - repeated ids are allowed and must produce repeated values
+ * - if any id is invalid, return SIM_ERR_INVALID_SIGNAL
+ */
+SimStatus sim_read_vals(const SignalId *ids, SimValue *out, uint32_t count);
+
+/**
  * @brief Write signal value (applied to simulation state).
  *
  * Type must match catalog metadata exactly.

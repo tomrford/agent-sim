@@ -61,13 +61,17 @@ agent-sim reset                       # Reset device state to deterministic star
 
 agent-sim get <signal> [<signal>...]  # Read signals (name, #id, or glob)
 agent-sim set <sig>=<val> [...]       # Write signals (batch supported)
-agent-sim watch <signal> [ms]         # Stream signal values
+agent-sim trace start <path> <period> # Start CSV tracing (all signals)
+agent-sim trace stop|clear|status
 
 agent-sim time start|pause|step|speed|status
 
 agent-sim env start <name>
 agent-sim env status <name>
 agent-sim env reset <name>
+agent-sim env signals <name> [selectors...]
+agent-sim env get <name> <selectors...>
+agent-sim env trace <name> start|stop|clear|status ...
 agent-sim env time <name> start|pause|step|speed|status
 agent-sim env can <name> buses|inspect|send|load-dbc|schedule ...
 

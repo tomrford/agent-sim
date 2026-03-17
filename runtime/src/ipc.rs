@@ -1,5 +1,8 @@
 use std::path::Path;
 
+use interprocess::local_socket::tokio::{Listener as TokioListener, Stream as TokioStream};
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(not(any(unix, windows)))]
@@ -12,66 +15,22 @@ impl<T> LocalStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 pub type BoxedLocalStream = Box<dyn LocalStream>;
 
 pub struct LocalListener {
-    inner: ListenerInner,
-}
-
-#[cfg(unix)]
-type ListenerInner = tokio::net::UnixListener;
-
-#[cfg(windows)]
-struct ListenerInner {
-    pipe_name: String,
-    server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    inner: TokioListener,
 }
 
 impl LocalListener {
     pub fn bind(endpoint: &Path) -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            Ok(Self {
-                inner: tokio::net::UnixListener::bind(endpoint)?,
-            })
-        }
-
-        #[cfg(windows)]
-        {
-            let pipe_name = pipe_name(endpoint);
-            let server = create_server(&pipe_name, true)?;
-            Ok(Self {
-                inner: ListenerInner {
-                    pipe_name,
-                    server: Some(server),
-                },
-            })
-        }
+        let name = endpoint_name(endpoint)?;
+        let inner = ListenerOptions::new()
+            .name(name)
+            .try_overwrite(false)
+            .create_tokio()?;
+        Ok(Self { inner })
     }
 
     pub async fn accept(&mut self) -> std::io::Result<BoxedLocalStream> {
-        #[cfg(unix)]
-        {
-            let (stream, _) = self.inner.accept().await?;
-            Ok(Box::new(stream))
-        }
-
-        #[cfg(windows)]
-        {
-            let connected = match self.inner.server.take() {
-                Some(server) => server,
-                None => create_server(&self.inner.pipe_name, false)?,
-            };
-            connected.connect().await?;
-            match create_next_server(&self.inner.pipe_name) {
-                Ok(next_server) => self.inner.server = Some(next_server),
-                Err(err) => {
-                    tracing::warn!(
-                        "failed to rotate named-pipe listener for '{}': {}",
-                        self.inner.pipe_name,
-                        err
-                    );
-                }
-            }
-            Ok(Box::new(connected))
-        }
+        let stream = self.inner.accept().await?;
+        Ok(Box::new(stream))
     }
 }
 
@@ -87,32 +46,8 @@ pub async fn bind_listener(endpoint: &Path) -> std::io::Result<LocalListener> {
 }
 
 pub async fn connect(endpoint: &Path) -> std::io::Result<BoxedLocalStream> {
-    #[cfg(unix)]
-    {
-        Ok(Box::new(tokio::net::UnixStream::connect(endpoint).await?))
-    }
-
-    #[cfg(windows)]
-    {
-        use std::time::Duration;
-        use tokio::net::windows::named_pipe::ClientOptions;
-        use tokio::time::sleep;
-
-        let pipe_name = pipe_name(endpoint);
-        for attempt in 0..WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS {
-            match ClientOptions::new().open(&pipe_name) {
-                Ok(client) => return Ok(Box::new(client)),
-                Err(err)
-                    if is_pipe_busy_error(&err)
-                        && attempt + 1 < WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS =>
-                {
-                    sleep(Duration::from_millis(WINDOWS_PIPE_BUSY_RETRY_DELAY_MS)).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        unreachable!("windows pipe retry loop should always return");
-    }
+    let name = endpoint_name(endpoint)?;
+    Ok(Box::new(TokioStream::connect(name).await?))
 }
 
 pub fn cleanup_endpoint(endpoint: &Path) {
@@ -141,6 +76,18 @@ fn is_bind_conflict(err: &std::io::Error) -> bool {
     )
 }
 
+fn endpoint_name(endpoint: &Path) -> std::io::Result<interprocess::local_socket::Name<'_>> {
+    #[cfg(unix)]
+    {
+        endpoint.to_fs_name::<GenericFilePath>()
+    }
+
+    #[cfg(windows)]
+    {
+        pipe_name(endpoint).to_fs_name::<GenericFilePath>()
+    }
+}
+
 #[cfg(windows)]
 fn pipe_name(endpoint: &Path) -> String {
     let raw = endpoint.to_string_lossy();
@@ -164,8 +111,6 @@ fn pipe_name(endpoint: &Path) -> String {
 }
 
 #[cfg(windows)]
-const WINDOWS_PIPE_BUSY: i32 = 231;
-#[cfg(windows)]
 const WINDOWS_PIPE_NAME_PREFIX: &str = r"\\.\pipe\agent-sim-";
 #[cfg(windows)]
 const WINDOWS_PIPE_NAME_MAX_LEN: usize = 256;
@@ -174,57 +119,6 @@ const WINDOWS_PIPE_HASH_SUFFIX_LEN: usize = 1 + 16;
 #[cfg(windows)]
 const WINDOWS_PIPE_STEM_MAX_LEN: usize =
     WINDOWS_PIPE_NAME_MAX_LEN - WINDOWS_PIPE_NAME_PREFIX.len() - WINDOWS_PIPE_HASH_SUFFIX_LEN;
-#[cfg(windows)]
-const WINDOWS_PIPE_BUSY_RETRY_ATTEMPTS: u32 = 10;
-#[cfg(windows)]
-const WINDOWS_PIPE_BUSY_RETRY_DELAY_MS: u64 = 50;
-
-#[cfg(windows)]
-fn create_server(
-    pipe_name: &str,
-    first_pipe_instance: bool,
-) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
-    if first_pipe_instance {
-        ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(pipe_name)
-    } else {
-        ServerOptions::new().create(pipe_name)
-    }
-}
-
-#[cfg(windows)]
-fn create_next_server(
-    pipe_name: &str,
-) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    match create_server(pipe_name, false) {
-        Ok(server) => Ok(server),
-        Err(primary_err) => match create_server(pipe_name, false) {
-            Ok(server) => Ok(server),
-            Err(recovery_err) => Err(create_next_server_error(primary_err, recovery_err)),
-        },
-    }
-}
-
-#[cfg(windows)]
-fn create_next_server_error(
-    primary_err: std::io::Error,
-    recovery_err: std::io::Error,
-) -> std::io::Error {
-    std::io::Error::new(
-        primary_err.kind(),
-        format!(
-            "failed to rotate Windows named-pipe listener after accept; first create failed: {primary_err}; retry failed: {recovery_err}"
-        ),
-    )
-}
-
-#[cfg(windows)]
-fn is_pipe_busy_error(err: &std::io::Error) -> bool {
-    err.raw_os_error() == Some(WINDOWS_PIPE_BUSY)
-}
 
 #[cfg(windows)]
 fn stable_hash64(raw: &str) -> u64 {
@@ -243,10 +137,7 @@ fn stable_hash64(raw: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{
-        WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, create_next_server_error,
-        is_pipe_busy_error, pipe_name, stable_hash64,
-    };
+    use super::{WINDOWS_PIPE_NAME_MAX_LEN, WINDOWS_PIPE_STEM_MAX_LEN, pipe_name, stable_hash64};
     #[cfg(windows)]
     use std::path::Path;
 
@@ -281,31 +172,6 @@ mod tests {
             name.len() <= WINDOWS_PIPE_NAME_MAX_LEN,
             "pipe name too long: {}",
             name.len()
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn pipe_busy_detection_matches_windows_error_code() {
-        assert!(is_pipe_busy_error(&std::io::Error::from_raw_os_error(231)));
-        assert!(!is_pipe_busy_error(&std::io::Error::from_raw_os_error(5)));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn create_next_server_error_reports_both_failures() {
-        let err = create_next_server_error(
-            std::io::Error::from_raw_os_error(8),
-            std::io::Error::from_raw_os_error(1450),
-        );
-        let message = err.to_string();
-        assert!(
-            message.contains("first create failed"),
-            "missing primary failure details: {message}"
-        );
-        assert!(
-            message.contains("retry failed"),
-            "missing recovery failure details: {message}"
         );
     }
 }

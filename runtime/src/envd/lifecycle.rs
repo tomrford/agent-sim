@@ -2,6 +2,7 @@ use crate::daemon::lifecycle::session_root;
 use crate::envd::error::EnvDaemonError;
 use crate::envd::spec::{EnvSpec, write_env_spec};
 use crate::ipc;
+use crate::name::validate_env_name;
 use crate::process::StartupLock;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,7 @@ impl EnvRegistry {
     }
 
     pub async fn ensure_running(self, env: &str) -> Result<(), EnvDaemonError> {
+        validate_env_name(env).map_err(EnvDaemonError::Request)?;
         std::fs::create_dir_all(env_root())?;
         let socket = socket_path(env);
         if can_connect(&socket).await {
@@ -75,6 +77,7 @@ impl EnvRegistry {
     }
 
     pub async fn bootstrap(self, env_spec: &EnvSpec) -> Result<(), EnvDaemonError> {
+        validate_env_name(&env_spec.name).map_err(EnvDaemonError::Request)?;
         std::fs::create_dir_all(env_root())?;
         std::fs::create_dir_all(bootstrap_dir())?;
         let _startup_lock =
@@ -163,6 +166,7 @@ fn read_pid(env: &str) -> Option<u32> {
 mod tests {
     #[cfg(unix)]
     use super::cleanup_bootstrap_timeout;
+    use super::{EnvDaemonError, EnvRegistry};
     #[cfg(unix)]
     use std::process::{Command, Stdio};
 
@@ -192,5 +196,17 @@ mod tests {
                 .is_some(),
             "timed-out child should be reaped"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_running_rejects_invalid_env_name() {
+        let err = EnvRegistry
+            .ensure_running("bad:name")
+            .await
+            .expect_err("invalid name should fail");
+        let EnvDaemonError::Request(message) = err else {
+            panic!("expected request error for invalid env name");
+        };
+        assert!(message.contains("expected [A-Za-z0-9_-]+"));
     }
 }

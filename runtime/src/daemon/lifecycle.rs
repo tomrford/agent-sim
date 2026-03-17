@@ -1,6 +1,7 @@
 use crate::daemon::error::DaemonError;
 use crate::ipc;
 use crate::load::{LoadSpec, write_load_spec};
+use crate::name::validate_instance_name;
 use crate::process::StartupLock;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -71,6 +72,7 @@ pub async fn bootstrap_daemon_with_exe(
 
 impl InstanceRegistry {
     pub async fn ensure_running(self, session: &str) -> Result<(), DaemonError> {
+        validate_instance_name(session).map_err(DaemonError::Request)?;
         std::fs::create_dir_all(session_root())?;
         let socket = socket_path(session);
         if can_connect(&socket).await {
@@ -90,6 +92,7 @@ impl InstanceRegistry {
         load_spec: &LoadSpec,
         exe: &Path,
     ) -> Result<(), DaemonError> {
+        validate_instance_name(session).map_err(DaemonError::Request)?;
         std::fs::create_dir_all(session_root())?;
         std::fs::create_dir_all(bootstrap_dir())?;
         let _startup_lock =
@@ -255,6 +258,7 @@ pub fn kill_pid(pid: u32) -> Result<(), DaemonError> {
 mod tests {
     #[cfg(unix)]
     use super::cleanup_bootstrap_timeout;
+    use super::{DaemonError, InstanceRegistry};
     #[cfg(unix)]
     use std::process::{Command, Stdio};
 
@@ -284,5 +288,17 @@ mod tests {
                 .is_some(),
             "timed-out child should be reaped"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_running_rejects_invalid_instance_name() {
+        let err = InstanceRegistry
+            .ensure_running("bad:name")
+            .await
+            .expect_err("invalid name should fail");
+        let DaemonError::Request(message) = err else {
+            panic!("expected request error for invalid instance name");
+        };
+        assert!(message.contains("expected [A-Za-z0-9_-]+"));
     }
 }
