@@ -496,7 +496,8 @@ async fn start_env_trace(state: &mut EnvState, path: &str, period: &str) -> Resu
 }
 
 fn stop_env_trace(state: &mut EnvState) {
-    if let Some(active) = state.trace.active.take() {
+    if let Some(mut active) = state.trace.active.take() {
+        let _ = active.writer.flush();
         state.trace.last_path = Some(active.writer.path().to_path_buf());
         state.trace.last_row_count = active.writer.row_count();
         state.trace.last_signal_count = active.signals.len();
@@ -505,7 +506,8 @@ fn stop_env_trace(state: &mut EnvState) {
 }
 
 fn clear_env_trace(state: &mut EnvState) -> Result<(), String> {
-    let path = if let Some(active) = state.trace.active.take() {
+    let path = if let Some(mut active) = state.trace.active.take() {
+        active.writer.flush()?;
         Some(active.writer.path().to_path_buf())
     } else {
         state.trace.last_path.clone()

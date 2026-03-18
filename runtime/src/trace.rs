@@ -58,17 +58,20 @@ impl CsvTraceWriter {
             self.writer
                 .write_all(b",")
                 .map_err(|err| format!("failed to write trace row separator: {err}"))?;
-            write_csv_cell(&mut self.writer, &format_value(value))
+            write_signal_value(&mut self.writer, value)
                 .map_err(|err| format!("failed to write trace row value: {err}"))?;
         }
         self.writer
             .write_all(b"\n")
             .map_err(|err| format!("failed to write trace row newline: {err}"))?;
+        self.row_count += 1;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), String> {
         self.writer
             .flush()
-            .map_err(|err| format!("failed to flush trace row: {err}"))?;
-        self.row_count = self.row_count.saturating_add(1);
-        Ok(())
+            .map_err(|err| format!("failed to flush trace file: {err}"))
     }
 
     pub fn row_count(&self) -> u64 {
@@ -80,13 +83,13 @@ impl CsvTraceWriter {
     }
 }
 
-fn format_value(value: &SignalValue) -> String {
+fn write_signal_value(writer: &mut impl Write, value: &SignalValue) -> Result<(), std::io::Error> {
     match value {
-        SignalValue::Bool(value) => value.to_string(),
-        SignalValue::U32(value) => value.to_string(),
-        SignalValue::I32(value) => value.to_string(),
-        SignalValue::F32(value) => value.to_string(),
-        SignalValue::F64(value) => value.to_string(),
+        SignalValue::Bool(value) => write!(writer, "{value}"),
+        SignalValue::U32(value) => write!(writer, "{value}"),
+        SignalValue::I32(value) => write!(writer, "{value}"),
+        SignalValue::F32(value) => write!(writer, "{value}"),
+        SignalValue::F64(value) => write!(writer, "{value}"),
     }
 }
 
@@ -107,6 +110,7 @@ fn escape_csv_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{CsvTraceWriter, escape_csv_cell};
+    use crate::sim::types::SignalValue;
 
     #[test]
     fn escape_csv_cell_quotes_commas_quotes_and_newlines() {
@@ -136,5 +140,22 @@ mod tests {
             header,
             "tick,time_us,\"signal,one\",\"signal\"\"two\",signal-three"
         );
+    }
+
+    #[test]
+    fn write_row_serializes_scalar_values_without_csv_escaping() {
+        let temp_dir = tempfile::tempdir().expect("tempdir should be creatable");
+        let trace_path = temp_dir.path().join("trace.csv");
+        let mut writer =
+            CsvTraceWriter::create(&trace_path, &["bool".to_string(), "num".to_string()])
+                .expect("trace writer should be creatable");
+
+        writer
+            .write_row(7, 42, &[SignalValue::Bool(true), SignalValue::F32(1.5)])
+            .expect("trace row should be writable");
+        writer.flush().expect("trace writer should flush");
+
+        let content = std::fs::read_to_string(trace_path).expect("trace file should be readable");
+        assert_eq!(content, "tick,time_us,bool,num\n7,42,true,1.5\n");
     }
 }

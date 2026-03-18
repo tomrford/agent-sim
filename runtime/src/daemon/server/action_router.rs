@@ -601,7 +601,8 @@ fn start_instance_trace(state: &mut DaemonState, path: &str, period: &str) -> Re
 }
 
 fn stop_instance_trace(state: &mut DaemonState) {
-    if let Some(active) = state.trace.active.take() {
+    if let Some(mut active) = state.trace.active.take() {
+        let _ = active.writer.flush();
         state.trace.last_path = Some(active.writer.path().to_path_buf());
         state.trace.last_row_count = active.writer.row_count();
         state.trace.last_signal_count = active.signal_ids.len();
@@ -610,7 +611,8 @@ fn stop_instance_trace(state: &mut DaemonState) {
 }
 
 fn clear_instance_trace(state: &mut DaemonState) -> Result<(), String> {
-    let path = if let Some(active) = state.trace.active.take() {
+    let path = if let Some(mut active) = state.trace.active.take() {
+        active.writer.flush()?;
         state.trace.last_row_count = active.writer.row_count();
         Some(active.writer.path().to_path_buf())
     } else {
