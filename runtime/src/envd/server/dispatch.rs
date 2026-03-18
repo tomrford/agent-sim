@@ -265,7 +265,7 @@ pub(super) async fn dispatch_action(
         }
         EnvAction::TraceStop { env } => {
             ensure_env_name(state, &env)?;
-            stop_env_trace(state);
+            stop_env_trace(state)?;
             Ok(trace_status_response(state))
         }
         EnvAction::TraceClear { env } => {
@@ -495,23 +495,32 @@ async fn start_env_trace(state: &mut EnvState, path: &str, period: &str) -> Resu
     Ok(())
 }
 
-fn stop_env_trace(state: &mut EnvState) {
-    if let Some(mut active) = state.trace.active.take() {
-        let _ = active.writer.flush();
-        state.trace.last_path = Some(active.writer.path().to_path_buf());
-        state.trace.last_row_count = active.writer.row_count();
-        state.trace.last_signal_count = active.signals.len();
-        state.trace.last_period_us = Some(active.period_us);
-    }
+fn stop_env_trace(state: &mut EnvState) -> Result<(), String> {
+    let Some(active) = state.trace.active.as_mut() else {
+        return Ok(());
+    };
+    active.writer.flush()?;
+    let path = active.writer.path().to_path_buf();
+    let row_count = active.writer.row_count();
+    let signal_count = active.signals.len();
+    let period_us = active.period_us;
+
+    state.trace.active = None;
+    state.trace.last_path = Some(path);
+    state.trace.last_row_count = row_count;
+    state.trace.last_signal_count = signal_count;
+    state.trace.last_period_us = Some(period_us);
+    Ok(())
 }
 
 fn clear_env_trace(state: &mut EnvState) -> Result<(), String> {
-    let path = if let Some(mut active) = state.trace.active.take() {
+    let path = if let Some(active) = state.trace.active.as_mut() {
         active.writer.flush()?;
         Some(active.writer.path().to_path_buf())
     } else {
         state.trace.last_path.clone()
     };
+    state.trace.active = None;
     if let Some(path) = path
         && path.exists()
     {
