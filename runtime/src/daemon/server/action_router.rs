@@ -103,7 +103,7 @@ pub(super) async fn dispatch_instance_action(
             Ok(trace_status_response(state))
         }
         InstanceAction::TraceStop => {
-            stop_instance_trace(state);
+            stop_instance_trace(state)?;
             Ok(trace_status_response(state))
         }
         InstanceAction::TraceClear => {
@@ -600,22 +600,32 @@ fn start_instance_trace(state: &mut DaemonState, path: &str, period: &str) -> Re
     Ok(())
 }
 
-fn stop_instance_trace(state: &mut DaemonState) {
-    if let Some(active) = state.trace.active.take() {
-        state.trace.last_path = Some(active.writer.path().to_path_buf());
-        state.trace.last_row_count = active.writer.row_count();
-        state.trace.last_signal_count = active.signal_ids.len();
-        state.trace.last_period_us = Some(active.period_us);
-    }
+fn stop_instance_trace(state: &mut DaemonState) -> Result<(), String> {
+    let Some(active) = state.trace.active.as_mut() else {
+        return Ok(());
+    };
+    active.writer.flush()?;
+    let path = active.writer.path().to_path_buf();
+    let row_count = active.writer.row_count();
+    let signal_count = active.signal_ids.len();
+    let period_us = active.period_us;
+
+    state.trace.active = None;
+    state.trace.last_path = Some(path);
+    state.trace.last_row_count = row_count;
+    state.trace.last_signal_count = signal_count;
+    state.trace.last_period_us = Some(period_us);
+    Ok(())
 }
 
 fn clear_instance_trace(state: &mut DaemonState) -> Result<(), String> {
-    let path = if let Some(active) = state.trace.active.take() {
-        state.trace.last_row_count = active.writer.row_count();
+    let path = if let Some(active) = state.trace.active.as_mut() {
+        active.writer.flush()?;
         Some(active.writer.path().to_path_buf())
     } else {
         state.trace.last_path.clone()
     };
+    state.trace.active = None;
     if let Some(path) = path
         && path.exists()
     {
