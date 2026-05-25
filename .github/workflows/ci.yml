@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   runtime-cross-platform:
     name: Runtime (${{ matrix.os }})
@@ -18,7 +21,7 @@ jobs:
           - windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
